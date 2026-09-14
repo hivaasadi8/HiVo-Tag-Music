@@ -18,29 +18,41 @@ if not TOKEN:
     sys.exit(1)
 
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
-CHANNEL_USERNAME = os.environ.get("CHANNEL_USERNAME", "").strip()  # مثل @HiVoChannel
-CHANNEL_LINK = os.environ.get("CHANNEL_LINK", "").strip()          # مثل https://t.me/HiVoChannel
 API = f"https://api.telegram.org/bot{TOKEN}"
 OFFSET_FILE = Path("offset.json")
 TEMP = Path("tmp")
 TEMP.mkdir(exist_ok=True)
 store = Store("state.json")
 session_http = requests.Session()
-MB_HEADERS = {"User-Agent": "HiVoTagMusic/1.0 (github.com/hivaasadi8/MusicTaggerBot)"}
+MB_HEADERS = {"User-Agent": "HiVoTagMusic/1.0"}
 
-# کش عضویت (برای جلوگیری از درخواست مکرر)
 membership_cache = {}
 
 
 # ============================================================
-#                    قفل عضویت (Force Join)
+#              تنظیمات قفل عضویت (داخل ربات)
 # ============================================================
-def is_user_member(user_id, force_check=False):
-    """چک می‌کنه که کاربر عضو کانال هست یا نه"""
-    if not CHANNEL_USERNAME:
-        return True  # اگه کانال تنظیم نشده، قفل غیرفعاله
+def get_lock_config():
+    """گرفتن تنظیمات قفل از state.json"""
+    cfg = store.data.setdefault("config", {})
+    cfg.setdefault("lock_enabled", False)
+    cfg.setdefault("channel_username", "")   # مثل @HiVoChannel
+    cfg.setdefault("channel_link", "")       # مثل https://t.me/HiVoChannel
+    return cfg
 
-    # چک کش (۵ دقیقه اعتبار)
+
+def save_lock_config(**kwargs):
+    cfg = get_lock_config()
+    cfg.update(kwargs)
+    store.data["config"] = cfg
+    store.save()
+
+
+def is_user_member(user_id, force_check=False):
+    cfg = get_lock_config()
+    if not cfg["lock_enabled"] or not cfg["channel_username"]:
+        return True
+
     cached = membership_cache.get(user_id)
     if cached and not force_check:
         if time.time() - cached["time"] < 300:
@@ -49,27 +61,23 @@ def is_user_member(user_id, force_check=False):
     try:
         r = session_http.post(
             f"{API}/getChatMember",
-            json={"chat_id": CHANNEL_USERNAME, "user_id": user_id},
+            json={"chat_id": cfg["channel_username"], "user_id": user_id},
             timeout=15,
         ).json()
-
         if not r.get("ok"):
-            log.error(f"getChatMember error: {r}")
-            # اگه خطا داد، اجازه بده (که ربات قفل نشه)
+            log.error(f"getChatMember: {r}")
             return True
-
         status = r["result"].get("status", "left")
         is_member = status in ("creator", "administrator", "member")
         membership_cache[user_id] = {"is_member": is_member, "time": time.time()}
         return is_member
-
     except Exception as e:
-        log.error(f"membership check error: {e}")
+        log.error(f"membership error: {e}")
         return True
 
 
 def send_join_lock(chat_id, lang="fa"):
-    """ارسال پیام قفل عضویت"""
+    cfg = get_lock_config()
     text = (
         "<b>🔒 قفل عضویت</b>\n\n"
         "برای استفاده از ربات، ابتدا در کانال زیر عضو شو 👇\n\n"
@@ -79,18 +87,53 @@ def send_join_lock(chat_id, lang="fa"):
         "To use the bot, join our channel first 👇\n\n"
         "<i>After joining, tap «✅ I Joined».</i>"
     )
-
-    keyboard = [
-        [{"text": "📢 عضویت در کانال" if lang == "fa" else "📢 Join Channel",
-          "url": CHANNEL_LINK or "https://t.me/"}],
-        [{"text": "✅ عضو شدم" if lang == "fa" else "✅ I Joined",
-          "callback_data": "check_membership"}],
-    ]
+    keyboard = []
+    if cfg["channel_link"]:
+        keyboard.append([{"text": "📢 عضویت در کانال" if lang == "fa" else "📢 Join Channel",
+                          "url": cfg["channel_link"]}])
+    keyboard.append([{"text": "✅ عضو شدم" if lang == "fa" else "✅ I Joined",
+                      "callback_data": "check_membership"}])
     send(chat_id, text, keyboard)
 
 
 # ============================================================
-#                    ترجمه‌ها (FA / EN)
+#              پنل ادمین
+# ============================================================
+def admin_menu():
+    cfg = get_lock_config()
+    status = "🟢 فعال" if cfg["lock_enabled"] else "🔴 غیرفعال"
+    ch = cfg["channel_username"] or "تنظیم نشده"
+    link = cfg["channel_link"] or "تنظیم نشده"
+
+    text = (
+        f"<b>👑 پنل مدیریت</b>\n\n"
+        f"<blockquote>"
+        f"<b>🔒 وضعیت قفل:</b> {status}\n"
+        f"<b>📢 کانال:</b> <code>{ch}</code>\n"
+        f"<b>🔗 لینک:</b> <code>{link}</code>"
+        f"</blockquote>\n\n"
+        f"<i>یکی از گزینه‌ها رو انتخاب کن 👇</i>"
+    )
+
+    toggle_btn = (
+        {"text": "🔴 غیرفعال کردن قفل", "callback_data": "admin_toggle"}
+        if cfg["lock_enabled"] else
+        {"text": "🟢 فعال کردن قفل", "callback_data": "admin_toggle"}
+    )
+
+    keyboard = [
+        [toggle_btn],
+        [{"text": "📢 تنظیم کانال", "callback_data": "admin_set_channel"}],
+        [{"text": "🔗 تنظیم لینک", "callback_data": "admin_set_link"}],
+        [{"text": "🧪 تست قفل", "callback_data": "admin_test"}],
+        [{"text": "📊 آمار ربات", "callback_data": "admin_stats"}],
+        [{"text": "🔙 بستن پنل", "callback_data": "admin_close"}],
+    ]
+    return text, keyboard
+
+
+# ============================================================
+#              ترجمه‌ها
 # ============================================================
 TEXTS = {
     "fa": {
@@ -112,7 +155,7 @@ TEXTS = {
         "btn_cover": "🖼 کاور آهنگ",
         "welcome": "<b>سلام {name} عزیز 👋</b>\n\nبه <b>HiVo Tag Music</b> خوش آمدی 🎧\nمن می‌تونم فایل موزیکت رو به یه اثر حرفه‌ای تبدیل کنم.\n\n<blockquote><b>✨ قابلیت‌های من:</b>\n├ ویرایش کامل تگ‌های صوتی\n├ افزودن کاور با کیفیت بالا\n├ 🔍 جستجوی چندمنبعی\n├ 🌐 پشتیبانی چندزبانه\n└ پردازش سریع و امن</blockquote>\n\n<i>برای شروع، فایل موزیکت رو بفرست 👇</i>",
         "help": "<b>📖 راهنمای کامل استفاده</b>\n\n<blockquote><b>مرحله ۱:</b> فایل موزیک رو بفرست\n<b>مرحله ۲:</b> روی گزینه‌ها بزن یا از جستجو استفاده کن\n<b>مرحله ۳:</b> برای کاور، عکس رو بفرست\n<b>مرحله ۴:</b> پیش‌نمایش رو ببین و تایید کن\n<b>مرحله ۵:</b> فایل نهایی رو دریافت کن</blockquote>",
-        "about": "<b>👑 درباره HiVo Tag Music</b>\n\n<blockquote>این ربات برای ویرایش حرفه‌ای تگ‌های موزیک طراحی شده و کاملاً رایگان است.</blockquote>\n\n<i>ساخته شده با ❤️ برای موزیک‌دوستان</i>",
+        "about": "<b>👑 درباره HiVo Tag Music</b>\n\n<blockquote>این ربات برای ویرایش حرفه‌ای تگ‌های موزیک طراحی شده و کاملاً رایگان است.</blockquote>\n\n<i>ساخته شده با ❤️</i>",
         "stats": "<b>📊 آمار و اطلاعات</b>\n\n<blockquote><b>🌍 آمار کلی:</b>\n├ کاربران: <b>{users}</b>\n└ فایل‌ها: <b>{files}</b></blockquote>\n<blockquote><b>👤 آمار شما:</b>\n├ نام: <b>{name}</b>\n├ زبان: <b>{lang}</b>\n└ فایل‌های شما: <b>{my_files}</b></blockquote>",
         "file_too_large": "<b>❌ فایل بزرگ‌تر از 20MB است</b>",
         "downloading": "📥 <b>در حال دریافت فایل...</b>",
@@ -148,13 +191,27 @@ TEXTS = {
         "file_header": "<blockquote><b>🎧 فایل در حال ویرایش</b>\n├ نام: <code>{name}</code>\n├ حجم: <code>{size}</code>\n└ تغییرات: <b>{count}</b> مورد</blockquote>",
         "welcome_back": "✅ <b>خوش اومدی!</b>\n\n<i>حالا می‌تونی از ربات استفاده کنی 🎧</i>",
         "not_joined": "❌ <b>هنوز عضو نشدی!</b>\n\n<i>اول عضو کانال شو، بعد دوباره بزن.</i>",
+        "admin_only": "⛔ این بخش فقط برای ادمین است.",
+        "admin_no_access": "⛔ شما ادمین نیستید.",
+        "admin_saved_channel": "✅ <b>کانال ذخیره شد!</b>\n\n📢 <code>{value}</code>",
+        "admin_saved_link": "✅ <b>لینک ذخیره شد!</b>\n\n🔗 <code>{value}</code>",
+        "admin_cancelled": "❌ لغو شد",
+        "admin_set_channel_prompt": "📢 <b>یوزرنیم کانال رو بفرست</b>\n\n<i>مثال: @HiVoChannel</i>\n\n<i>نکته: ربات باید ادمین کانال باشه.</i>",
+        "admin_set_link_prompt": "🔗 <b>لینک کانال رو بفرست</b>\n\n<i>مثال: https://t.me/HiVoChannel</i>",
+        "admin_toggled_on": "🟢 قفل فعال شد!",
+        "admin_toggled_off": "🔴 قفل غیرفعال شد!",
+        "admin_need_channel": "⚠️ اول باید کانال رو تنظیم کنی!",
+        "admin_test_member": "✅ شما عضو کانال هستید.",
+        "admin_test_not_member": "❌ شما عضو کانال نیستید.\n\n<i>اگه مطمئنی عضو هستی، ممکنه ربات ادمین کانال نباشه.</i>",
+        "admin_test_disabled": "🔴 قفل غیرفعاله، پس همه می‌تونن استفاده کنن.",
+        "admin_stats_text": "📊 <b>آمار ربات</b>\n\n<blockquote>👥 کاربران: <b>{users}</b>\n🎵 فایل‌ها: <b>{files}</b>\n🔒 قفل: <b>{lock}</b>\n📢 کانال: <code>{channel}</code></blockquote>",
     },
     "en": {
         "btn_help": "📖 Help",
         "btn_stats": "📊 My Stats",
         "btn_about": "👑 About",
         "btn_lang": "🌐 Change Language",
-        "btn_back": "🔙 Back to Edit",
+        "btn_back": "🔙 Back",
         "btn_cancel": "❌ Cancel",
         "btn_preview": "👁 Preview & Confirm",
         "btn_apply": "✨ Yes, Apply",
@@ -165,45 +222,59 @@ TEXTS = {
         "btn_year": "📅 Year",
         "btn_genre": "🎼 Genre",
         "btn_track": "🔢 Track No.",
-        "btn_cover": "🖼 Cover Art",
-        "welcome": "<b>Hello {name} 👋</b>\n\nWelcome to <b>HiVo Tag Music</b> 🎧\n\n<blockquote><b>✨ Features:</b>\n├ Full tag editing\n├ High-quality cover art\n├ 🔍 Multi-source search\n├ 🌐 Multi-language\n└ Fast & secure</blockquote>\n\n<i>Send your music file to start 👇</i>",
-        "help": "<b>📖 Guide</b>\n\n<blockquote><b>Step 1:</b> Send music file\n<b>Step 2:</b> Tap options or use search\n<b>Step 3:</b> Send cover\n<b>Step 4:</b> Preview & confirm\n<b>Step 5:</b> Receive edited file</blockquote>",
-        "about": "<b>👑 About HiVo Tag Music</b>\n\n<blockquote>A professional music tag editor. Completely free.</blockquote>\n\n<i>Made with ❤️</i>",
-        "stats": "<b>📊 Stats</b>\n\n<blockquote><b>🌍 Global:</b>\n├ Users: <b>{users}</b>\n└ Files: <b>{files}</b></blockquote>\n<blockquote><b>👤 You:</b>\n├ Name: <b>{name}</b>\n├ Language: <b>{lang}</b>\n└ Files: <b>{my_files}</b></blockquote>",
-        "file_too_large": "<b>❌ File larger than 20MB</b>",
+        "btn_cover": "🖼 Cover",
+        "welcome": "<b>Hello {name} 👋</b>\n\nWelcome to <b>HiVo Tag Music</b> 🎧\n\n<i>Send your music file to start 👇</i>",
+        "help": "<b>📖 Guide</b>\n\n<blockquote>1️⃣ Send music file\n2️⃣ Tap options or use search\n3️⃣ Send cover\n4️⃣ Preview & confirm\n5️⃣ Get edited file</blockquote>",
+        "about": "<b>👑 About HiVo Tag Music</b>\n\n<blockquote>Professional music tag editor. Free.</blockquote>",
+        "stats": "<b>📊 Stats</b>\n\n<blockquote>Users: <b>{users}</b>\nFiles: <b>{files}</b>\nYour files: <b>{my_files}</b></blockquote>",
+        "file_too_large": "<b>❌ File > 20MB</b>",
         "downloading": "📥 <b>Downloading...</b>",
         "download_error": "❌ <b>Download failed</b>",
-        "file_received": "<b>✅ File received!</b>\n\n{header}\n\n<i>Tap options 👇</i>",
-        "search_prompt": "🔍 <b>Auto Search</b>\n\n<i>Type the song name and artist.</i>\n\n<b>Example:</b> <code>Shape of You Ed Sheeran</code>",
+        "file_received": "<b>✅ File received!</b>\n\n{header}",
+        "search_prompt": "🔍 <b>Auto Search</b>\n\nType song + artist.\n\n<b>e.g.</b> <code>Shape of You Ed Sheeran</code>",
         "searching": "🔄 <b>Searching...</b>",
-        "search_empty": "❌ <b>Nothing found!</b>\n\n<i>Enter info manually 👇</i>",
+        "search_empty": "❌ <b>Nothing found!</b>",
         "search_results": "🎯 <b>{count} results</b>",
         "search_applied": "✅ <b>Applied!</b>\n\n<i>Source: {source}</i>",
-        "preview": "<b>👁 Preview</b>\n\n<blockquote>🎵 <b>Title:</b> <code>{title}</code>\n🎤 <b>Artist:</b> <code>{artist}</code>\n💿 <b>Album:</b> <code>{album}</code>\n📅 <b>Year:</b> <code>{year}</code>\n🎼 <b>Genre:</b> <code>{genre}</code>\n🔢 <b>Track:</b> <code>{track}</code>\n🖼 <b>Cover:</b> {cover}</blockquote>",
+        "preview": "<b>👁 Preview</b>\n\n<blockquote>🎵 {title}\n🎤 {artist}\n💿 {album}\n📅 {year}\n🎼 {genre}\n🔢 {track}\n🖼 {cover}</blockquote>",
         "cover_yes": "✅ Yes",
         "cover_no": "❌ No",
-        "applying": "⏳ <b>[1/3] Applying tags...</b>",
-        "uploading": "✅ <b>[2/3] Tags applied</b>\n\n📤 <b>[3/3] Uploading...</b>\n<blockquote>Size: <b>{size}</b></blockquote>",
-        "success": "✨ <b>Done!</b>\n\n<i>Thanks for using HiVo Tag Music 🎧</i>",
+        "applying": "⏳ <b>[1/3] Applying...</b>",
+        "uploading": "✅ <b>[2/3] Applied</b>\n\n📤 <b>[3/3] Uploading...</b>",
+        "success": "✨ <b>Done!</b>",
         "upload_error": "❌ <b>Upload failed</b>",
         "cancelled": "❌ <b>Cancelled</b>",
         "session_expired": "⚠️ Session expired",
         "saved_field": "✅ <b>Saved:</b> <code>{value}</code>",
         "cover_saved": "🖼 <b>Cover saved!</b>",
-        "cover_error": "❌ Cover processing failed",
+        "cover_error": "❌ Cover error",
         "lang_changed": "✅ <b>Language changed</b>",
         "lang_menu": "🌐 <b>Choose language:</b>",
-        "caption_success": "✅ <b>Tags applied!</b>\n\n<blockquote>🎵 <b>{title}</b>\n🎤 {artist}\n💿 {album}</blockquote>\n\n<i>HiVo Tag Music 🎧</i>",
+        "caption_success": "✅ <b>Tags applied!</b>\n\n<blockquote>🎵 <b>{title}</b>\n🎤 {artist}\n💿 {album}</blockquote>",
         "prompt_title": "🎵 <b>New title:</b>",
         "prompt_artist": "🎤 <b>New artist:</b>",
         "prompt_album": "💿 <b>New album:</b>",
-        "prompt_year": "📅 <b>Release year:</b>",
+        "prompt_year": "📅 <b>Year:</b>",
         "prompt_genre": "🎼 <b>Genre:</b>",
-        "prompt_track": "🔢 <b>Track number:</b>",
-        "prompt_cover": "🖼 <b>Send cover image</b>",
-        "file_header": "<blockquote><b>🎧 Editing File</b>\n├ Name: <code>{name}</code>\n├ Size: <code>{size}</code>\n└ Changes: <b>{count}</b></blockquote>",
-        "welcome_back": "✅ <b>Welcome!</b>\n\n<i>You can use the bot now 🎧</i>",
-        "not_joined": "❌ <b>Not joined yet!</b>\n\n<i>Join the channel first, then tap again.</i>",
+        "prompt_track": "🔢 <b>Track:</b>",
+        "prompt_cover": "🖼 <b>Send cover</b>",
+        "file_header": "<blockquote>🎧 <code>{name}</code>\n{size} • {count} changes</blockquote>",
+        "welcome_back": "✅ <b>Welcome!</b>",
+        "not_joined": "❌ <b>Not joined!</b>",
+        "admin_only": "⛔ Admin only.",
+        "admin_no_access": "⛔ You are not admin.",
+        "admin_saved_channel": "✅ Channel saved: <code>{value}</code>",
+        "admin_saved_link": "✅ Link saved: <code>{value}</code>",
+        "admin_cancelled": "❌ Cancelled",
+        "admin_set_channel_prompt": "📢 Send channel username (e.g. @HiVoChannel)",
+        "admin_set_link_prompt": "🔗 Send channel link (e.g. https://t.me/HiVoChannel)",
+        "admin_toggled_on": "🟢 Lock enabled!",
+        "admin_toggled_off": "🔴 Lock disabled!",
+        "admin_need_channel": "⚠️ Set channel first!",
+        "admin_test_member": "✅ You are member.",
+        "admin_test_not_member": "❌ You are NOT member.",
+        "admin_test_disabled": "🔴 Lock disabled.",
+        "admin_stats_text": "📊 Users: <b>{users}</b> | Files: <b>{files}</b> | Lock: <b>{lock}</b> | Channel: <code>{channel}</code>",
     },
 }
 
@@ -315,10 +386,9 @@ def send_audio(chat_id, path, caption="", cover_path=None, title=None, performer
     for attempt in range(3):
         files = {}
         try:
-            log.info(f"📤 Upload try {attempt+1} ({human_size(Path(path).stat().st_size)})")
+            log.info(f"📤 Upload try {attempt+1}")
             files = {"audio": open(path, "rb")}
             data = {"chat_id": chat_id, "caption": caption, "parse_mode": "HTML"}
-
             if title:
                 data["title"] = title[:64]
             if performer:
@@ -339,11 +409,10 @@ def send_audio(chat_id, path, caption="", cover_path=None, title=None, performer
                 except Exception:
                     pass
             if r.status_code == 200:
-                log.info("✅ Sent.")
                 return True
             log.error(f"Send error: {r.text}")
         except Exception as e:
-            log.error(f"❌ Upload error (try {attempt+1}): {e}")
+            log.error(f"❌ Upload error: {e}")
             for f in files.values():
                 try:
                     f.close()
@@ -354,7 +423,7 @@ def send_audio(chat_id, path, caption="", cover_path=None, title=None, performer
 
 
 # ============================================================
-#            جستجوی چندمنبعی
+#                    جستجو
 # ============================================================
 def search_itunes(query, limit=5):
     try:
@@ -396,14 +465,8 @@ def search_ytmusic(query, limit=5):
             year = str(album.get("year", "")) if isinstance(album, dict) and album.get("year") else ""
             thumbs = item.get("thumbnails", [])
             artwork = thumbs[-1]["url"] if thumbs else ""
-            out.append({
-                "title": item.get("title", "Unknown"),
-                "artist": artist,
-                "album": album_name,
-                "year": year,
-                "genre": "",
-                "artwork_url": artwork,
-            })
+            out.append({"title": item.get("title", "Unknown"), "artist": artist,
+                        "album": album_name, "year": year, "genre": "", "artwork_url": artwork})
         return out
     except Exception as e:
         log.error(f"YTM: {e}")
@@ -423,15 +486,9 @@ def search_musicbrainz(query, limit=5):
             releases = rec.get("releases", [])
             release = releases[0] if releases else {}
             tags = rec.get("tags", [])
-            genre = tags[0]["name"] if tags else ""
-            out.append({
-                "title": rec.get("title", "Unknown"),
-                "artist": artist or "Unknown",
-                "album": release.get("title", ""),
-                "year": (release.get("date", "") or "")[:4],
-                "genre": genre,
-                "artwork_url": "",
-            })
+            out.append({"title": rec.get("title", "Unknown"), "artist": artist or "Unknown",
+                        "album": release.get("title", ""), "year": (release.get("date", "") or "")[:4],
+                        "genre": tags[0]["name"] if tags else "", "artwork_url": ""})
         return out
     except Exception as e:
         log.error(f"MB: {e}")
@@ -442,7 +499,6 @@ def search_all_sources(query, limit=5):
     for name, fn in [("iTunes", search_itunes), ("YouTube Music", search_ytmusic), ("MusicBrainz", search_musicbrainz)]:
         results = fn(query, limit)
         if results:
-            log.info(f"✅ {name}: {len(results)}")
             return results, name
     return [], ""
 
@@ -568,12 +624,18 @@ def cmd_stats(chat_id, user):
     s = store.get_stats()
     me = store.data["users"].get(str(user["id"]), {})
     lang_name = "فارسی" if lang == "fa" else "English"
-    text = T("stats", lang,
-             users=s["users"], files=s["files"],
-             name=me.get("name", "---"),
-             my_files=me.get("files", 0),
-             lang=lang_name)
+    text = T("stats", lang, users=s["users"], files=s["files"],
+             name=me.get("name", "---"), my_files=me.get("files", 0), lang=lang_name)
     send(chat_id, text, main_menu(lang))
+
+
+def cmd_admin(chat_id, user):
+    """پنل ادمین"""
+    if user["id"] != ADMIN_ID:
+        send(chat_id, T("admin_no_access", get_user_lang(user["id"])))
+        return
+    text, keyboard = admin_menu()
+    send(chat_id, text, keyboard)
 
 
 def handle_audio(chat_id, user, msg):
@@ -603,10 +665,8 @@ def handle_audio(chat_id, user, msg):
         return
 
     session = {
-        "file": str(path),
-        "orig_name": audio.get("file_name", "music" + ext),
-        "title": audio.get("title"),
-        "artist": audio.get("performer"),
+        "file": str(path), "orig_name": audio.get("file_name", "music" + ext),
+        "title": audio.get("title"), "artist": audio.get("performer"),
         "album": None, "year": None, "genre": None, "track": None, "cover": None,
     }
     store.set_session(user["id"], session)
@@ -614,12 +674,9 @@ def handle_audio(chat_id, user, msg):
 
 
 FIELD_KEYS = {
-    "f_title": ("title", "prompt_title"),
-    "f_artist": ("artist", "prompt_artist"),
-    "f_album": ("album", "prompt_album"),
-    "f_year": ("year", "prompt_year"),
-    "f_genre": ("genre", "prompt_genre"),
-    "f_track": ("track", "prompt_track"),
+    "f_title": ("title", "prompt_title"), "f_artist": ("artist", "prompt_artist"),
+    "f_album": ("album", "prompt_album"), "f_year": ("year", "prompt_year"),
+    "f_genre": ("genre", "prompt_genre"), "f_track": ("track", "prompt_track"),
     "f_cover": ("cover", "prompt_cover"),
 }
 
@@ -633,15 +690,69 @@ def handle_callback(cb):
     user = cb["from"]
     data = cb["data"]
     lang = get_user_lang(user["id"])
+    is_admin = (user["id"] == ADMIN_ID)
 
-    # ✅ چک عضویت برای همه دکمه‌ها (به‌جز خود دکمه‌های قفل)
-    if data not in ("check_membership",) and data != "help":
-        if not is_user_member(user["id"]):
+    # ============ پنل ادمین ============
+    if data.startswith("admin_"):
+        if not is_admin:
+            answer_cb(cb["id"], T("admin_no_access", lang))
+            return
+
+        if data == "admin_close":
+            answer_cb(cb["id"])
+            edit_msg(chat_id, msg_id, "👑 <b>پنل بسته شد.</b>")
+            return
+        if data == "admin_toggle":
+            cfg = get_lock_config()
+            if not cfg["channel_username"] and not cfg["lock_enabled"]:
+                answer_cb(cb["id"], T("admin_need_channel", lang))
+                return
+            new_state = not cfg["lock_enabled"]
+            save_lock_config(lock_enabled=new_state)
+            answer_cb(cb["id"], T("admin_toggled_on" if new_state else "admin_toggled_off", lang))
+            text, keyboard = admin_menu()
+            edit_msg(chat_id, msg_id, text, keyboard)
+            return
+        if data == "admin_set_channel":
+            answer_cb(cb["id"])
+            store.data.setdefault("admin_awaiting", {})[str(user["id"])] = "channel_username"
+            store.save()
+            edit_msg(chat_id, msg_id, T("admin_set_channel_prompt", lang))
+            return
+        if data == "admin_set_link":
+            answer_cb(cb["id"])
+            store.data.setdefault("admin_awaiting", {})[str(user["id"])] = "channel_link"
+            store.save()
+            edit_msg(chat_id, msg_id, T("admin_set_link_prompt", lang))
+            return
+        if data == "admin_test":
+            if not get_lock_config()["lock_enabled"]:
+                answer_cb(cb["id"], T("admin_test_disabled", lang))
+                return
+            if is_user_member(user["id"], force_check=True):
+                answer_cb(cb["id"], T("admin_test_member", lang))
+            else:
+                answer_cb(cb["id"], T("admin_test_not_member", lang))
+            return
+        if data == "admin_stats":
+            s = store.get_stats()
+            cfg = get_lock_config()
+            answer_cb(cb["id"])
+            text = T("admin_stats_text", lang,
+                     users=s["users"], files=s["files"],
+                     lock="🟢" if cfg["lock_enabled"] else "🔴",
+                     channel=cfg["channel_username"] or "—")
+            send(chat_id, text)
+            return
+        return
+
+    # ============ چک عضویت برای بقیه ============
+    if data != "check_membership" and data != "help":
+        if not is_user_member(user["id"]) and not is_admin:
             answer_cb(cb["id"], T("not_joined", lang))
             send_join_lock(chat_id, lang)
             return
 
-    # دکمه «عضو شدم»
     if data == "check_membership":
         if is_user_member(user["id"], force_check=True):
             answer_cb(cb["id"], "✅")
@@ -667,7 +778,6 @@ def handle_callback(cb):
         answer_cb(cb["id"])
         send(chat_id, T("about", lang), main_menu(lang))
         return
-
     if data == "lang_menu":
         answer_cb(cb["id"])
         edit_msg(chat_id, msg_id, T("lang_menu", lang), lang_menu())
@@ -693,18 +803,15 @@ def handle_callback(cb):
 
     if data == "back":
         answer_cb(cb["id"])
-        edit_msg(chat_id, msg_id,
-                 T("file_received", lang, header=session_header(session, lang)),
+        edit_msg(chat_id, msg_id, T("file_received", lang, header=session_header(session, lang)),
                  edit_menu(session, lang))
         return
-
     if data == "search":
         answer_cb(cb["id"])
         session["awaiting"] = "search_query"
         store.set_session(user["id"], session)
         send(chat_id, T("search_prompt", lang))
         return
-
     if data.startswith("sr_"):
         try:
             idx = int(data.split("_", 1)[1])
@@ -717,10 +824,8 @@ def handle_callback(cb):
             return
         r = results[idx]
         answer_cb(cb["id"], "✅")
-        session["title"] = r["title"]
-        session["artist"] = r["artist"]
-        session["album"] = r["album"]
-        session["year"] = r["year"]
+        session.update({"title": r["title"], "artist": r["artist"],
+                        "album": r["album"], "year": r["year"]})
         if r.get("genre"):
             session["genre"] = r["genre"]
 
@@ -741,46 +846,31 @@ def handle_callback(cb):
         text = f"{T('search_applied', lang, source=source)}\n\n{session_header(session, lang)}"
         edit_msg(chat_id, msg_id, text, edit_menu(session, lang))
         return
-
     if data == "preview":
         answer_cb(cb["id"])
         cover_status = T("cover_yes", lang) if session.get("cover") else T("cover_no", lang)
         text = T("preview", lang,
-                 title=session.get("title") or "---",
-                 artist=session.get("artist") or "---",
-                 album=session.get("album") or "---",
-                 year=session.get("year") or "---",
-                 genre=session.get("genre") or "---",
-                 track=session.get("track") or "---",
+                 title=session.get("title") or "---", artist=session.get("artist") or "---",
+                 album=session.get("album") or "---", year=session.get("year") or "---",
+                 genre=session.get("genre") or "---", track=session.get("track") or "---",
                  cover=cover_status)
         edit_msg(chat_id, msg_id, text, preview_menu(lang))
         return
-
     if data == "apply":
         answer_cb(cb["id"], "⏳")
         edit_msg(chat_id, msg_id, T("applying", lang))
         try:
             edit_tags(
-                file_path=session["file"],
-                title=session.get("title"),
-                artist=session.get("artist"),
-                album=session.get("album"),
-                year=session.get("year"),
-                genre=session.get("genre"),
-                track=session.get("track"),
-                cover_path=session.get("cover"),
+                file_path=session["file"], title=session.get("title"), artist=session.get("artist"),
+                album=session.get("album"), year=session.get("year"), genre=session.get("genre"),
+                track=session.get("track"), cover_path=session.get("cover"),
             )
             out = Path(session["file"])
             user_temp = TEMP / str(user["id"])
             user_temp.mkdir(exist_ok=True)
 
-            # ✅ اسم فایل = فقط اسم آهنگ (بدون خواننده)
             final_title = (session.get("title") or "").strip()
-            if final_title:
-                clean_name = f"{final_title}{out.suffix}"
-            else:
-                clean_name = session.get("orig_name") or f"music{out.suffix}"
-
+            clean_name = f"{final_title}{out.suffix}" if final_title else (session.get("orig_name") or f"music{out.suffix}")
             for ch in ['/', '\\', ':', '*', '?', '"', '<', '>', '|']:
                 clean_name = clean_name.replace(ch, "_")
 
@@ -795,20 +885,15 @@ def handle_callback(cb):
                         artist=session.get("artist") or "---",
                         album=session.get("album") or "---")
 
-            success = send_audio(
-                chat_id, new_name,
-                caption=caption,
-                cover_path=session.get("cover"),
-                title=session.get("title"),
-                performer=session.get("artist"),
-            )
+            success = send_audio(chat_id, new_name, caption=caption,
+                                 cover_path=session.get("cover"),
+                                 title=session.get("title"), performer=session.get("artist"))
 
             if success:
                 store.inc_files(user["id"])
                 edit_msg(chat_id, msg_id, T("success", lang))
             else:
                 edit_msg(chat_id, msg_id, T("upload_error", lang))
-
             try:
                 new_name.unlink()
             except Exception:
@@ -816,10 +901,8 @@ def handle_callback(cb):
         except Exception as e:
             log.exception("tag error")
             send(chat_id, f"❌ <code>{e}</code>")
-
         store.clear_session(user["id"])
         return
-
     if data in FIELD_KEYS:
         field, prompt_key = FIELD_KEYS[data]
         answer_cb(cb["id"])
@@ -834,7 +917,30 @@ def handle_callback(cb):
 # ============================================================
 def handle_text(chat_id, user, text):
     lang = get_user_lang(user["id"])
-    if not is_user_member(user["id"]):
+    is_admin = (user["id"] == ADMIN_ID)
+
+    # === چک awaiting ادمین ===
+    if is_admin:
+        admin_awaiting = store.data.setdefault("admin_awaiting", {})
+        waiting_for = admin_awaiting.get(str(user["id"]))
+        if waiting_for:
+            value = text.strip()
+            if waiting_for == "channel_username":
+                if not value.startswith("@"):
+                    value = "@" + value
+                save_lock_config(channel_username=value)
+                admin_awaiting.pop(str(user["id"]), None)
+                store.save()
+                send(chat_id, T("admin_saved_channel", lang, value=value))
+                return True
+            if waiting_for == "channel_link":
+                save_lock_config(channel_link=value)
+                admin_awaiting.pop(str(user["id"]), None)
+                store.save()
+                send(chat_id, T("admin_saved_link", lang, value=value))
+                return True
+
+    if not is_user_member(user["id"]) and not is_admin:
         send_join_lock(chat_id, lang)
         return False
 
@@ -848,12 +954,10 @@ def handle_text(chat_id, user, text):
         session.pop("awaiting", None)
         store.set_session(user["id"], session)
         send(chat_id, T("searching", lang))
-
         results, source = search_all_sources(text, limit=5)
         if not results:
             send(chat_id, T("search_empty", lang), edit_menu(session, lang))
             return True
-
         session["search_results"] = results
         session["search_source"] = source
         store.set_session(user["id"], session)
@@ -869,7 +973,7 @@ def handle_text(chat_id, user, text):
 
 def handle_photo(chat_id, user, msg):
     lang = get_user_lang(user["id"])
-    if not is_user_member(user["id"]):
+    if not is_user_member(user["id"]) and user["id"] != ADMIN_ID:
         send_join_lock(chat_id, lang)
         return
 
@@ -912,14 +1016,14 @@ def setup_bot():
         log.error("❌ Invalid token!")
         sys.exit(1)
     log.info(f"✅ Connected: @{me['result']['username']}")
-    log.info(f"📢 Channel: {CHANNEL_USERNAME or '(disabled)'}")
+    cfg = get_lock_config()
+    log.info(f"🔒 Lock: {'ON' if cfg['lock_enabled'] else 'OFF'} | Channel: {cfg['channel_username'] or '—'}")
     api("setMyCommands", commands=[
         {"command": "start", "description": "🏠 / شروع"},
         {"command": "help", "description": "📖 / راهنما"},
         {"command": "stats", "description": "📊 / آمار"},
     ])
     api("setChatMenuButton", menu_button={"type": "commands"})
-    log.info("✅ Menu configured.")
 
 
 def main():
@@ -930,19 +1034,13 @@ def main():
 
     while time.time() - start < 355 * 60:
         try:
-            r = requests.get(
-                f"{API}/getUpdates",
-                params={"offset": offset, "timeout": 30},
-                timeout=40,
-            ).json()
+            r = requests.get(f"{API}/getUpdates", params={"offset": offset, "timeout": 30}, timeout=40).json()
             if not r.get("ok"):
-                log.error(f"getUpdates: {r.get('description', '?')}")
                 time.sleep(10)
                 continue
 
             for upd in r.get("result", []):
                 offset = upd["update_id"] + 1
-                log.info(f"📩 Update {offset}")
                 try:
                     if "message" in upd:
                         m = upd["message"]
@@ -958,9 +1056,8 @@ def main():
                                 cmd_help(chat_id, user)
                             elif t.startswith("/stats"):
                                 cmd_stats(chat_id, user)
-                            elif t.startswith("/admin") and user["id"] == ADMIN_ID:
-                                s = store.get_stats()
-                                send(chat_id, f"👑 <b>Admin</b>\n\n👥 {s['users']}\n🎵 {s['files']}")
+                            elif t.startswith("/admin"):
+                                cmd_admin(chat_id, user)
                             else:
                                 handle_text(chat_id, user, t)
 
