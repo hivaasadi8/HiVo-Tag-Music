@@ -18,6 +18,8 @@ if not TOKEN:
     sys.exit(1)
 
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
+CHANNEL_USERNAME = os.environ.get("CHANNEL_USERNAME", "").strip()  # مثل @HiVoChannel
+CHANNEL_LINK = os.environ.get("CHANNEL_LINK", "").strip()          # مثل https://t.me/HiVoChannel
 API = f"https://api.telegram.org/bot{TOKEN}"
 OFFSET_FILE = Path("offset.json")
 TEMP = Path("tmp")
@@ -25,6 +27,66 @@ TEMP.mkdir(exist_ok=True)
 store = Store("state.json")
 session_http = requests.Session()
 MB_HEADERS = {"User-Agent": "HiVoTagMusic/1.0 (github.com/hivaasadi8/MusicTaggerBot)"}
+
+# کش عضویت (برای جلوگیری از درخواست مکرر)
+membership_cache = {}
+
+
+# ============================================================
+#                    قفل عضویت (Force Join)
+# ============================================================
+def is_user_member(user_id, force_check=False):
+    """چک می‌کنه که کاربر عضو کانال هست یا نه"""
+    if not CHANNEL_USERNAME:
+        return True  # اگه کانال تنظیم نشده، قفل غیرفعاله
+
+    # چک کش (۵ دقیقه اعتبار)
+    cached = membership_cache.get(user_id)
+    if cached and not force_check:
+        if time.time() - cached["time"] < 300:
+            return cached["is_member"]
+
+    try:
+        r = session_http.post(
+            f"{API}/getChatMember",
+            json={"chat_id": CHANNEL_USERNAME, "user_id": user_id},
+            timeout=15,
+        ).json()
+
+        if not r.get("ok"):
+            log.error(f"getChatMember error: {r}")
+            # اگه خطا داد، اجازه بده (که ربات قفل نشه)
+            return True
+
+        status = r["result"].get("status", "left")
+        is_member = status in ("creator", "administrator", "member")
+        membership_cache[user_id] = {"is_member": is_member, "time": time.time()}
+        return is_member
+
+    except Exception as e:
+        log.error(f"membership check error: {e}")
+        return True
+
+
+def send_join_lock(chat_id, lang="fa"):
+    """ارسال پیام قفل عضویت"""
+    text = (
+        "<b>🔒 قفل عضویت</b>\n\n"
+        "برای استفاده از ربات، ابتدا در کانال زیر عضو شو 👇\n\n"
+        "<i>بعد از عضویت، روی «✅ عضو شدم» بزن.</i>"
+    ) if lang == "fa" else (
+        "<b>🔒 Membership Lock</b>\n\n"
+        "To use the bot, join our channel first 👇\n\n"
+        "<i>After joining, tap «✅ I Joined».</i>"
+    )
+
+    keyboard = [
+        [{"text": "📢 عضویت در کانال" if lang == "fa" else "📢 Join Channel",
+          "url": CHANNEL_LINK or "https://t.me/"}],
+        [{"text": "✅ عضو شدم" if lang == "fa" else "✅ I Joined",
+          "callback_data": "check_membership"}],
+    ]
+    send(chat_id, text, keyboard)
 
 
 # ============================================================
@@ -48,42 +110,44 @@ TEXTS = {
         "btn_genre": "🎼 ژانر",
         "btn_track": "🔢 شماره ترک",
         "btn_cover": "🖼 کاور آهنگ",
-        "welcome": "<b>سلام {name} عزیز 👋</b>\n\nبه <b>HiVo Tag Music</b> خوش آمدی 🎧\nمن می‌تونم فایل موزیکت رو به یه اثر حرفه‌ای تبدیل کنم.\n\n<blockquote><b>✨ قابلیت‌های من:</b>\n├ ویرایش کامل تگ‌های صوتی\n├ افزودن کاور با کیفیت بالا\n├ 🔍 جستجوی چندمنبعی (iTunes + YouTube Music + MusicBrainz + SoundCloud)\n├ 🌐 پشتیبانی چندزبانه (فارسی/انگلیسی)\n└ پردازش سریع و امن</blockquote>\n\n<i>برای شروع، فایل موزیکت رو بفرست 👇</i>",
-        "help": "<b>📖 راهنمای کامل استفاده</b>\n\n<blockquote><b>مرحله ۱:</b> فایل موزیک رو بفرست\n<b>مرحله ۲:</b> روی گزینه‌ها بزن یا از جستجوی خودکار استفاده کن\n<b>مرحله ۳:</b> برای کاور، عکس رو بفرست\n<b>مرحله ۴:</b> پیش‌نمایش رو ببین و تایید کن\n<b>مرحله ۵:</b> فایل نهایی رو دریافت کن</blockquote>\n\n<b>💡 نکات:</b>\n├ حداکثر حجم فایل: <b>20MB</b>\n├ 🔍 جستجوی چندمنبعی برای پیدا کردن اطلاعات\n├ 🌐 با دکمه زبان، بین فارسی و انگلیسی سوییچ کن\n└ همه تغییرات خودکار ذخیره می‌شه",
-        "about": "<b>👑 درباره HiVo Tag Music</b>\n\n<blockquote>این ربات برای ویرایش حرفه‌ای تگ‌های موزیک طراحی شده و کاملاً رایگان است.</blockquote>\n\n<b>🔧 تکنولوژی:</b>\n├ Python + Telegram Bot API\n├ موتور Mutagen\n├ 🔍 iTunes + YouTube Music + MusicBrainz + SoundCloud\n└ GitHub Actions (میزبانی)\n\n<i>ساخته شده با ❤️ برای موزیک‌دوستان</i>",
+        "welcome": "<b>سلام {name} عزیز 👋</b>\n\nبه <b>HiVo Tag Music</b> خوش آمدی 🎧\nمن می‌تونم فایل موزیکت رو به یه اثر حرفه‌ای تبدیل کنم.\n\n<blockquote><b>✨ قابلیت‌های من:</b>\n├ ویرایش کامل تگ‌های صوتی\n├ افزودن کاور با کیفیت بالا\n├ 🔍 جستجوی چندمنبعی\n├ 🌐 پشتیبانی چندزبانه\n└ پردازش سریع و امن</blockquote>\n\n<i>برای شروع، فایل موزیکت رو بفرست 👇</i>",
+        "help": "<b>📖 راهنمای کامل استفاده</b>\n\n<blockquote><b>مرحله ۱:</b> فایل موزیک رو بفرست\n<b>مرحله ۲:</b> روی گزینه‌ها بزن یا از جستجو استفاده کن\n<b>مرحله ۳:</b> برای کاور، عکس رو بفرست\n<b>مرحله ۴:</b> پیش‌نمایش رو ببین و تایید کن\n<b>مرحله ۵:</b> فایل نهایی رو دریافت کن</blockquote>",
+        "about": "<b>👑 درباره HiVo Tag Music</b>\n\n<blockquote>این ربات برای ویرایش حرفه‌ای تگ‌های موزیک طراحی شده و کاملاً رایگان است.</blockquote>\n\n<i>ساخته شده با ❤️ برای موزیک‌دوستان</i>",
         "stats": "<b>📊 آمار و اطلاعات</b>\n\n<blockquote><b>🌍 آمار کلی:</b>\n├ کاربران: <b>{users}</b>\n└ فایل‌ها: <b>{files}</b></blockquote>\n<blockquote><b>👤 آمار شما:</b>\n├ نام: <b>{name}</b>\n├ زبان: <b>{lang}</b>\n└ فایل‌های شما: <b>{my_files}</b></blockquote>",
-        "file_too_large": "<b>❌ فایل بزرگ‌تر از 20MB است</b>\n\n<i>تلگرام اجازه دانلود فایل‌های بزرگ‌تر رو به ربات‌ها نمی‌ده.</i>",
-        "downloading": "📥 <b>در حال دریافت فایل...</b>\n<i>لطفاً صبر کن</i>",
-        "download_error": "❌ <b>خطا در دریافت فایل</b>\nدوباره تلاش کن.",
-        "file_received": "<b>✅ فایل با موفقیت دریافت شد!</b>\n\n{header}\n\n<i>حالا گزینه‌ها رو انتخاب کن یا از جستجوی خودکار استفاده کن 👇</i>",
-        "search_prompt": "🔍 <b>جستجوی خودکار در منابع موزیک</b>\n\n<i>اسم آهنگ و خواننده رو بنویس تا اطلاعات و کاور رو از بین iTunes، YouTube Music، MusicBrainz و SoundCloud پیدا کنم.</i>\n\n<b>مثال:</b> <code>Shape of You Ed Sheeran</code>",
-        "searching": "🔄 <b>در حال جستجو در منابع...</b>\n<i>iTunes → YouTube Music → MusicBrainz → SoundCloud</i>",
-        "search_empty": "❌ <b>متاسفانه اطلاعاتی پیدا نشد!</b>\n\n<i>می‌تونی اطلاعات رو دستی وارد کنی. روی دکمه‌های زیر بزن و هر فیلد رو پر کن 👇</i>",
-        "search_results": "🎯 <b>{count} نتیجه پیدا شد</b>\n\n<i>روی نتیجه مورد نظرت بزن 👇</i>",
-        "search_applied": "✅ <b>اطلاعات با موفقیت اعمال شد!</b>\n\n<i>منبع: {source}</i>\n\n<i>می‌تونی تغییرات دیگه‌ای بدی یا پیش‌نمایش رو بزنی.</i>",
-        "preview": "<b>👁 پیش‌نمایش تغییرات نهایی</b>\n\n<blockquote>🎵 <b>اسم آهنگ:</b> <code>{title}</code>\n🎤 <b>خواننده:</b> <code>{artist}</code>\n💿 <b>آلبوم:</b> <code>{album}</code>\n📅 <b>سال:</b> <code>{year}</code>\n🎼 <b>ژانر:</b> <code>{genre}</code>\n🔢 <b>شماره ترک:</b> <code>{track}</code>\n🖼 <b>کاور:</b> {cover}</blockquote>\n\n<i>آیا از اعمال مطمئنی؟</i>",
-        "cover_yes": "✅ تنظیم شده",
-        "cover_no": "❌ تنظیم نشده",
-        "applying": "⏳ <b>[۱/۳] در حال اعمال تگ‌ها...</b>\n<i>موتور Mutagen در حال کاره</i>",
-        "uploading": "✅ <b>[۲/۳] تگ‌ها اعمال شد</b>\n\n📤 <b>[۳/۳] در حال آپلود فایل...</b>\n<blockquote>حجم: <b>{size}</b>\n<i>بسته به سرعت گیت‌هاب، ۱ تا ۲ دقیقه طول می‌کشه</i></blockquote>",
-        "success": "✨ <b>عملیات با موفقیت به پایان رسید!</b>\n\n<i>ممنون که از HiVo Tag Music استفاده کردی 🎧</i>",
-        "upload_error": "❌ <b>خطا در آپلود فایل به تلگرام</b>\n\n<i>دوباره تلاش کن.</i>",
-        "cancelled": "❌ <b>عملیات لغو شد</b>\n\n<i>هر وقت خواستی، فایل جدید بفرست.</i>",
-        "session_expired": "⚠️ سشن منقضی شده، فایل رو دوباره بفرست",
-        "saved_field": "✅ <b>ثبت شد:</b> <code>{value}</code>\n\n<i>تغییرات دیگه‌ای اعمال کن یا پیش‌نمایش رو بزن 👇</i>",
-        "cover_saved": "🖼 <b>کاور با موفقیت ثبت شد!</b>\n\n<i>حالا تغییرات دیگه‌ای بده یا پیش‌نمایش رو بزن 👇</i>",
-        "cover_error": "❌ خطا در پردازش عکس کاور",
-        "lang_changed": "✅ <b>زبان با موفقیت تغییر کرد</b>\n\n🌐 زبان فعلی: <b>فارسی</b>",
-        "lang_menu": "🌐 <b>زبان مورد نظرت رو انتخاب کن:</b>",
-        "caption_success": "✅ <b>تگ‌ها با موفقیت اعمال شد!</b>\n\n<blockquote>🎵 <b>{title}</b>\n🎤 {artist}\n💿 {album}</blockquote>\n\n<i>HiVo Tag Music 🎧</i>",
-        "prompt_title": "🎵 <b>اسم جدید آهنگ:</b>\n\n<i>مثال: Shape of You</i>",
-        "prompt_artist": "🎤 <b>اسم جدید خواننده:</b>\n\n<i>مثال: Ed Sheeran</i>",
-        "prompt_album": "💿 <b>اسم جدید آلبوم:</b>\n\n<i>مثال: Divide</i>",
-        "prompt_year": "📅 <b>سال انتشار:</b>\n\n<i>مثال: 2017</i>",
-        "prompt_genre": "🎼 <b>ژانر موزیک:</b>\n\n<i>مثال: Pop, Rock</i>",
-        "prompt_track": "🔢 <b>شماره ترک:</b>\n\n<i>مثال: 1</i>",
-        "prompt_cover": "🖼 <b>عکس کاور رو بفرست</b>\n\n<i>به‌صورت Photo یا Document</i>",
+        "file_too_large": "<b>❌ فایل بزرگ‌تر از 20MB است</b>",
+        "downloading": "📥 <b>در حال دریافت فایل...</b>",
+        "download_error": "❌ <b>خطا در دریافت فایل</b>",
+        "file_received": "<b>✅ فایل دریافت شد!</b>\n\n{header}\n\n<i>گزینه‌ها رو انتخاب کن 👇</i>",
+        "search_prompt": "🔍 <b>جستجوی خودکار</b>\n\n<i>اسم آهنگ و خواننده رو بنویس.</i>\n\n<b>مثال:</b> <code>Shape of You Ed Sheeran</code>",
+        "searching": "🔄 <b>در حال جستجو...</b>",
+        "search_empty": "❌ <b>چیزی پیدا نشد!</b>\n\n<i>اطلاعات رو دستی وارد کن 👇</i>",
+        "search_results": "🎯 <b>{count} نتیجه پیدا شد</b>",
+        "search_applied": "✅ <b>اعمال شد!</b>\n\n<i>منبع: {source}</i>",
+        "preview": "<b>👁 پیش‌نمایش نهایی</b>\n\n<blockquote>🎵 <b>اسم آهنگ:</b> <code>{title}</code>\n🎤 <b>خواننده:</b> <code>{artist}</code>\n💿 <b>آلبوم:</b> <code>{album}</code>\n📅 <b>سال:</b> <code>{year}</code>\n🎼 <b>ژانر:</b> <code>{genre}</code>\n🔢 <b>ترک:</b> <code>{track}</code>\n🖼 <b>کاور:</b> {cover}</blockquote>",
+        "cover_yes": "✅ دارد",
+        "cover_no": "❌ ندارد",
+        "applying": "⏳ <b>[۱/۳] اعمال تگ‌ها...</b>",
+        "uploading": "✅ <b>[۲/۳] تگ‌ها اعمال شد</b>\n\n📤 <b>[۳/۳] آپلود...</b>\n<blockquote>حجم: <b>{size}</b></blockquote>",
+        "success": "✨ <b>تمام شد!</b>\n\n<i>ممنون از HiVo Tag Music 🎧</i>",
+        "upload_error": "❌ <b>خطا در آپلود</b>",
+        "cancelled": "❌ <b>لغو شد</b>",
+        "session_expired": "⚠️ سشن منقضی شد",
+        "saved_field": "✅ <b>ثبت شد:</b> <code>{value}</code>",
+        "cover_saved": "🖼 <b>کاور ثبت شد!</b>",
+        "cover_error": "❌ خطا در پردازش کاور",
+        "lang_changed": "✅ <b>زبان تغییر کرد</b>",
+        "lang_menu": "🌐 <b>زبان رو انتخاب کن:</b>",
+        "caption_success": "✅ <b>تگ‌ها اعمال شد!</b>\n\n<blockquote>🎵 <b>{title}</b>\n🎤 {artist}\n💿 {album}</blockquote>\n\n<i>HiVo Tag Music 🎧</i>",
+        "prompt_title": "🎵 <b>اسم جدید آهنگ:</b>",
+        "prompt_artist": "🎤 <b>اسم جدید خواننده:</b>",
+        "prompt_album": "💿 <b>اسم جدید آلبوم:</b>",
+        "prompt_year": "📅 <b>سال انتشار:</b>",
+        "prompt_genre": "🎼 <b>ژانر:</b>",
+        "prompt_track": "🔢 <b>شماره ترک:</b>",
+        "prompt_cover": "🖼 <b>عکس کاور رو بفرست</b>",
         "file_header": "<blockquote><b>🎧 فایل در حال ویرایش</b>\n├ نام: <code>{name}</code>\n├ حجم: <code>{size}</code>\n└ تغییرات: <b>{count}</b> مورد</blockquote>",
+        "welcome_back": "✅ <b>خوش اومدی!</b>\n\n<i>حالا می‌تونی از ربات استفاده کنی 🎧</i>",
+        "not_joined": "❌ <b>هنوز عضو نشدی!</b>\n\n<i>اول عضو کانال شو، بعد دوباره بزن.</i>",
     },
     "en": {
         "btn_help": "📖 Help",
@@ -102,42 +166,44 @@ TEXTS = {
         "btn_genre": "🎼 Genre",
         "btn_track": "🔢 Track No.",
         "btn_cover": "🖼 Cover Art",
-        "welcome": "<b>Hello {name} 👋</b>\n\nWelcome to <b>HiVo Tag Music</b> 🎧\nI can turn your music file into a professional piece.\n\n<blockquote><b>✨ Features:</b>\n├ Full audio tag editing\n├ High-quality cover art\n├ 🔍 Multi-source search (iTunes + YouTube Music + MusicBrainz + SoundCloud)\n├ 🌐 Multi-language (FA/EN)\n└ Fast & secure processing</blockquote>\n\n<i>To start, just send your music file 👇</i>",
-        "help": "<b>📖 Complete Guide</b>\n\n<blockquote><b>Step 1:</b> Send your music file\n<b>Step 2:</b> Tap options or use auto-search\n<b>Step 3:</b> Send cover as photo\n<b>Step 4:</b> Preview & confirm\n<b>Step 5:</b> Receive edited file</blockquote>\n\n<b>💡 Tips:</b>\n├ Max file size: <b>20MB</b>\n├ 🔍 Multi-source search for info\n├ 🌐 Toggle FA/EN anytime\n└ Changes are saved automatically",
-        "about": "<b>👑 About HiVo Tag Music</b>\n\n<blockquote>A bot specially designed for professional music tag editing. Completely free.</blockquote>\n\n<b>🔧 Tech Stack:</b>\n├ Python + Telegram Bot API\n├ Mutagen engine\n├ 🔍 iTunes + YouTube Music + MusicBrainz + SoundCloud\n└ Hosted on GitHub Actions\n\n<i>Made with ❤️ for music lovers</i>",
-        "stats": "<b>📊 Stats & Info</b>\n\n<blockquote><b>🌍 Global:</b>\n├ Users: <b>{users}</b>\n└ Files: <b>{files}</b></blockquote>\n<blockquote><b>👤 You:</b>\n├ Name: <b>{name}</b>\n├ Language: <b>{lang}</b>\n└ Your files: <b>{my_files}</b></blockquote>",
-        "file_too_large": "<b>❌ File larger than 20MB</b>\n\n<i>Telegram doesn't allow bots to download larger files.</i>",
-        "downloading": "📥 <b>Downloading file...</b>\n<i>Please wait</i>",
-        "download_error": "❌ <b>Download failed</b>\nPlease try again.",
-        "file_received": "<b>✅ File received!</b>\n\n{header}\n\n<i>Tap options or use auto-search 👇</i>",
-        "search_prompt": "🔍 <b>Multi-Source Auto Search</b>\n\n<i>Type the song name and artist to fetch info and cover from iTunes, YouTube Music, MusicBrainz and SoundCloud.</i>\n\n<b>Example:</b> <code>Shape of You Ed Sheeran</code>",
-        "searching": "🔄 <b>Searching sources...</b>\n<i>iTunes → YouTube Music → MusicBrainz → SoundCloud</i>",
-        "search_empty": "❌ <b>No results found!</b>\n\n<i>You can enter info manually. Tap the buttons below to fill each field 👇</i>",
-        "search_results": "🎯 <b>{count} results found</b>\n\n<i>Tap the one you want 👇</i>",
-        "search_applied": "✅ <b>Info applied!</b>\n\n<i>Source: {source}</i>\n\n<i>Make more changes or preview.</i>",
-        "preview": "<b>👁 Final Preview</b>\n\n<blockquote>🎵 <b>Title:</b> <code>{title}</code>\n🎤 <b>Artist:</b> <code>{artist}</code>\n💿 <b>Album:</b> <code>{album}</code>\n📅 <b>Year:</b> <code>{year}</code>\n🎼 <b>Genre:</b> <code>{genre}</code>\n🔢 <b>Track:</b> <code>{track}</code>\n🖼 <b>Cover:</b> {cover}</blockquote>\n\n<i>Are you sure?</i>",
-        "cover_yes": "✅ Set",
-        "cover_no": "❌ Not set",
-        "applying": "⏳ <b>[1/3] Applying tags...</b>\n<i>Mutagen engine is working</i>",
-        "uploading": "✅ <b>[2/3] Tags applied</b>\n\n📤 <b>[3/3] Uploading file...</b>\n<blockquote>Size: <b>{size}</b>\n<i>May take 1-2 min depending on GitHub speed</i></blockquote>",
-        "success": "✨ <b>Operation completed!</b>\n\n<i>Thanks for using HiVo Tag Music 🎧</i>",
-        "upload_error": "❌ <b>Upload failed</b>\n\n<i>Please try again.</i>",
-        "cancelled": "❌ <b>Cancelled</b>\n\n<i>Send a new file anytime.</i>",
-        "session_expired": "⚠️ Session expired, send the file again",
-        "saved_field": "✅ <b>Saved:</b> <code>{value}</code>\n\n<i>Make more changes or preview 👇</i>",
-        "cover_saved": "🖼 <b>Cover saved!</b>\n\n<i>Make more changes or preview 👇</i>",
+        "welcome": "<b>Hello {name} 👋</b>\n\nWelcome to <b>HiVo Tag Music</b> 🎧\n\n<blockquote><b>✨ Features:</b>\n├ Full tag editing\n├ High-quality cover art\n├ 🔍 Multi-source search\n├ 🌐 Multi-language\n└ Fast & secure</blockquote>\n\n<i>Send your music file to start 👇</i>",
+        "help": "<b>📖 Guide</b>\n\n<blockquote><b>Step 1:</b> Send music file\n<b>Step 2:</b> Tap options or use search\n<b>Step 3:</b> Send cover\n<b>Step 4:</b> Preview & confirm\n<b>Step 5:</b> Receive edited file</blockquote>",
+        "about": "<b>👑 About HiVo Tag Music</b>\n\n<blockquote>A professional music tag editor. Completely free.</blockquote>\n\n<i>Made with ❤️</i>",
+        "stats": "<b>📊 Stats</b>\n\n<blockquote><b>🌍 Global:</b>\n├ Users: <b>{users}</b>\n└ Files: <b>{files}</b></blockquote>\n<blockquote><b>👤 You:</b>\n├ Name: <b>{name}</b>\n├ Language: <b>{lang}</b>\n└ Files: <b>{my_files}</b></blockquote>",
+        "file_too_large": "<b>❌ File larger than 20MB</b>",
+        "downloading": "📥 <b>Downloading...</b>",
+        "download_error": "❌ <b>Download failed</b>",
+        "file_received": "<b>✅ File received!</b>\n\n{header}\n\n<i>Tap options 👇</i>",
+        "search_prompt": "🔍 <b>Auto Search</b>\n\n<i>Type the song name and artist.</i>\n\n<b>Example:</b> <code>Shape of You Ed Sheeran</code>",
+        "searching": "🔄 <b>Searching...</b>",
+        "search_empty": "❌ <b>Nothing found!</b>\n\n<i>Enter info manually 👇</i>",
+        "search_results": "🎯 <b>{count} results</b>",
+        "search_applied": "✅ <b>Applied!</b>\n\n<i>Source: {source}</i>",
+        "preview": "<b>👁 Preview</b>\n\n<blockquote>🎵 <b>Title:</b> <code>{title}</code>\n🎤 <b>Artist:</b> <code>{artist}</code>\n💿 <b>Album:</b> <code>{album}</code>\n📅 <b>Year:</b> <code>{year}</code>\n🎼 <b>Genre:</b> <code>{genre}</code>\n🔢 <b>Track:</b> <code>{track}</code>\n🖼 <b>Cover:</b> {cover}</blockquote>",
+        "cover_yes": "✅ Yes",
+        "cover_no": "❌ No",
+        "applying": "⏳ <b>[1/3] Applying tags...</b>",
+        "uploading": "✅ <b>[2/3] Tags applied</b>\n\n📤 <b>[3/3] Uploading...</b>\n<blockquote>Size: <b>{size}</b></blockquote>",
+        "success": "✨ <b>Done!</b>\n\n<i>Thanks for using HiVo Tag Music 🎧</i>",
+        "upload_error": "❌ <b>Upload failed</b>",
+        "cancelled": "❌ <b>Cancelled</b>",
+        "session_expired": "⚠️ Session expired",
+        "saved_field": "✅ <b>Saved:</b> <code>{value}</code>",
+        "cover_saved": "🖼 <b>Cover saved!</b>",
         "cover_error": "❌ Cover processing failed",
-        "lang_changed": "✅ <b>Language changed</b>\n\n🌐 Current: <b>English</b>",
-        "lang_menu": "🌐 <b>Choose your language:</b>",
-        "caption_success": "✅ <b>Tags applied successfully!</b>\n\n<blockquote>🎵 <b>{title}</b>\n🎤 {artist}\n💿 {album}</blockquote>\n\n<i>HiVo Tag Music 🎧</i>",
-        "prompt_title": "🎵 <b>New title:</b>\n\n<i>e.g. Shape of You</i>",
-        "prompt_artist": "🎤 <b>New artist:</b>\n\n<i>e.g. Ed Sheeran</i>",
-        "prompt_album": "💿 <b>New album:</b>\n\n<i>e.g. Divide</i>",
-        "prompt_year": "📅 <b>Release year:</b>\n\n<i>e.g. 2017</i>",
-        "prompt_genre": "🎼 <b>Genre:</b>\n\n<i>e.g. Pop, Rock</i>",
-        "prompt_track": "🔢 <b>Track number:</b>\n\n<i>e.g. 1</i>",
-        "prompt_cover": "🖼 <b>Send cover image</b>\n\n<i>As Photo or Document</i>",
-        "file_header": "<blockquote><b>🎧 File being edited</b>\n├ Name: <code>{name}</code>\n├ Size: <code>{size}</code>\n└ Changes: <b>{count}</b></blockquote>",
+        "lang_changed": "✅ <b>Language changed</b>",
+        "lang_menu": "🌐 <b>Choose language:</b>",
+        "caption_success": "✅ <b>Tags applied!</b>\n\n<blockquote>🎵 <b>{title}</b>\n🎤 {artist}\n💿 {album}</blockquote>\n\n<i>HiVo Tag Music 🎧</i>",
+        "prompt_title": "🎵 <b>New title:</b>",
+        "prompt_artist": "🎤 <b>New artist:</b>",
+        "prompt_album": "💿 <b>New album:</b>",
+        "prompt_year": "📅 <b>Release year:</b>",
+        "prompt_genre": "🎼 <b>Genre:</b>",
+        "prompt_track": "🔢 <b>Track number:</b>",
+        "prompt_cover": "🖼 <b>Send cover image</b>",
+        "file_header": "<blockquote><b>🎧 Editing File</b>\n├ Name: <code>{name}</code>\n├ Size: <code>{size}</code>\n└ Changes: <b>{count}</b></blockquote>",
+        "welcome_back": "✅ <b>Welcome!</b>\n\n<i>You can use the bot now 🎧</i>",
+        "not_joined": "❌ <b>Not joined yet!</b>\n\n<i>Join the channel first, then tap again.</i>",
     },
 }
 
@@ -173,13 +239,6 @@ def human_size(b):
 
 def short_name(name, maxlen=32):
     return name if len(name) <= maxlen else name[:maxlen - 3] + "..."
-
-
-def safe_filename(name):
-    """پاکسازی اسم فایل از کاراکترهای غیرمجاز"""
-    for ch in ['/', '\\', ':', '*', '?', '"', '<', '>', '|', '\n', '\r', '\t']:
-        name = name.replace(ch, "_")
-    return name.strip() or "music"
 
 
 def api(method, **params):
@@ -252,30 +311,18 @@ def download(file_id, name):
         return None
 
 
-def send_audio(chat_id, path, caption="", cover_path=None, title=None, performer=None, album=None):
-    """
-    ارسال فایل صوتی با اطلاعات کامل:
-    - title = اسم آهنگ
-    - performer = اسم خواننده
-    - album = اسم آلبوم
-    """
+def send_audio(chat_id, path, caption="", cover_path=None, title=None, performer=None):
     for attempt in range(3):
         files = {}
         try:
             log.info(f"📤 Upload try {attempt+1} ({human_size(Path(path).stat().st_size)})")
             files = {"audio": open(path, "rb")}
-            data = {
-                "chat_id": chat_id,
-                "caption": caption,
-                "parse_mode": "HTML",
-            }
-            # ✅ اطلاعاتی که تلگرام برای نمایش استفاده می‌کنه
+            data = {"chat_id": chat_id, "caption": caption, "parse_mode": "HTML"}
+
             if title:
                 data["title"] = title[:64]
             if performer:
                 data["performer"] = performer[:64]
-            if album:
-                data["album"] = album[:64]
 
             if cover_path and Path(cover_path).exists():
                 thumb_path = TEMP / "thumb.jpg"
@@ -286,13 +333,11 @@ def send_audio(chat_id, path, caption="", cover_path=None, title=None, performer
                 files["thumb"] = open(thumb_path, "rb")
 
             r = session_http.post(f"{API}/sendAudio", data=data, files=files, timeout=300)
-
             for f in files.values():
                 try:
                     f.close()
                 except Exception:
                     pass
-
             if r.status_code == 200:
                 log.info("✅ Sent.")
                 return True
@@ -309,34 +354,29 @@ def send_audio(chat_id, path, caption="", cover_path=None, title=None, performer
 
 
 # ============================================================
-#            جستجوی چندمنبعی (Multi-Source Search)
+#            جستجوی چندمنبعی
 # ============================================================
-
 def search_itunes(query, limit=5):
-    url = "https://itunes.apple.com/search"
-    params = {"term": query, "media": "music", "entity": "song", "limit": limit}
     try:
-        r = session_http.get(url, params=params, timeout=20)
+        r = session_http.get("https://itunes.apple.com/search",
+                             params={"term": query, "media": "music", "entity": "song", "limit": limit},
+                             timeout=20)
         if r.status_code != 200:
             return []
         out = []
         for item in r.json().get("results", [])[:limit]:
-            artwork = item.get("artworkUrl100", "")
-            if artwork:
-                artwork = artwork.replace("100x100", "1000x1000")
+            artwork = item.get("artworkUrl100", "").replace("100x100", "1000x1000")
             out.append({
                 "title": item.get("trackName", "Unknown"),
                 "artist": item.get("artistName", "Unknown"),
                 "album": item.get("collectionName", ""),
                 "year": (item.get("releaseDate", "") or "")[:4],
                 "genre": item.get("primaryGenreName", ""),
-                "release_id": item.get("collectionId", ""),
                 "artwork_url": artwork,
-                "length": item.get("trackTimeMillis", 0),
             })
         return out
     except Exception as e:
-        log.error(f"iTunes error: {e}")
+        log.error(f"iTunes: {e}")
         return []
 
 
@@ -353,42 +393,33 @@ def search_ytmusic(query, limit=5):
             artist = artists[0]["name"] if artists else "Unknown"
             album = item.get("album", {})
             album_name = album.get("name", "") if isinstance(album, dict) else ""
-            year = ""
-            if album.get("year"):
-                year = str(album["year"])
-            thumbnails = item.get("thumbnails", [])
-            artwork = thumbnails[-1]["url"] if thumbnails else ""
+            year = str(album.get("year", "")) if isinstance(album, dict) and album.get("year") else ""
+            thumbs = item.get("thumbnails", [])
+            artwork = thumbs[-1]["url"] if thumbs else ""
             out.append({
                 "title": item.get("title", "Unknown"),
                 "artist": artist,
                 "album": album_name,
                 "year": year,
                 "genre": "",
-                "release_id": item.get("videoId", ""),
                 "artwork_url": artwork,
-                "length": item.get("duration_seconds", 0),
             })
         return out
-    except ImportError:
-        log.warning("ytmusicapi نصب نیست.")
-        return []
     except Exception as e:
-        log.error(f"YouTube Music error: {e}")
+        log.error(f"YTM: {e}")
         return []
 
 
 def search_musicbrainz(query, limit=5):
-    url = "https://musicbrainz.org/ws/2/recording/"
-    params = {"query": query, "fmt": "json", "limit": limit}
     try:
-        r = session_http.get(url, params=params, headers=MB_HEADERS, timeout=20)
+        r = session_http.get("https://musicbrainz.org/ws/2/recording/",
+                             params={"query": query, "fmt": "json", "limit": limit},
+                             headers=MB_HEADERS, timeout=20)
         if r.status_code != 200:
             return []
         out = []
         for rec in r.json().get("recordings", [])[:limit]:
-            artist = ""
-            if rec.get("artist-credit"):
-                artist = rec["artist-credit"][0].get("name", "")
+            artist = rec["artist-credit"][0].get("name", "") if rec.get("artist-credit") else ""
             releases = rec.get("releases", [])
             release = releases[0] if releases else {}
             tags = rec.get("tags", [])
@@ -399,29 +430,20 @@ def search_musicbrainz(query, limit=5):
                 "album": release.get("title", ""),
                 "year": (release.get("date", "") or "")[:4],
                 "genre": genre,
-                "release_id": release.get("id", ""),
                 "artwork_url": "",
-                "length": rec.get("length", 0),
             })
         return out
     except Exception as e:
-        log.error(f"MusicBrainz error: {e}")
+        log.error(f"MB: {e}")
         return []
 
 
-def search_soundcloud(query, limit=5):
-    return []
-
-
 def search_all_sources(query, limit=5):
-    log.info(f"🔍 Searching all sources: {query}")
-    for name, fn in [("iTunes", search_itunes), ("YouTube Music", search_ytmusic),
-                     ("MusicBrainz", search_musicbrainz), ("SoundCloud", search_soundcloud)]:
+    for name, fn in [("iTunes", search_itunes), ("YouTube Music", search_ytmusic), ("MusicBrainz", search_musicbrainz)]:
         results = fn(query, limit)
         if results:
-            log.info(f"✅ {name} found {len(results)}")
+            log.info(f"✅ {name}: {len(results)}")
             return results, name
-    log.info("❌ No results.")
     return [], ""
 
 
@@ -435,7 +457,7 @@ def fetch_cover_art(artwork_url, dest_path):
                 f.write(r.content)
             return True
     except Exception as e:
-        log.error(f"Cover fetch error: {e}")
+        log.error(f"Cover: {e}")
     return False
 
 
@@ -460,8 +482,7 @@ def lang_menu():
 
 
 def session_header(session, lang="fa"):
-    name = session.get("orig_name", "---")
-    name = short_name(name, 30)
+    name = short_name(session.get("orig_name", "---"), 30)
     try:
         size = human_size(Path(session["file"]).stat().st_size) if Path(session["file"]).exists() else "---"
     except Exception:
@@ -476,7 +497,6 @@ def edit_menu(session, lang="fa"):
     def btn(field, emoji, key):
         mark = "✅" if session.get(field) else "◽️"
         return {"text": f"{emoji} {T(key, lang)} {mark}", "callback_data": f"f_{field}"}
-
     return [
         [btn("title", "🎵", "btn_title"), btn("artist", "🎤", "btn_artist")],
         [btn("album", "💿", "btn_album"), btn("year", "📅", "btn_year")],
@@ -511,6 +531,11 @@ def search_results_menu(results, lang="fa"):
 def cmd_start(chat_id, user):
     store.add_user(user["id"], user.get("first_name", ""))
     lang = get_user_lang(user["id"])
+
+    if not is_user_member(user["id"]):
+        send_join_lock(chat_id, lang)
+        return
+
     text = T("welcome", lang, name=user.get("first_name", ""))
     banner = Path("banner.jpg")
     if banner.exists():
@@ -520,16 +545,25 @@ def cmd_start(chat_id, user):
 
 
 def cmd_help(chat_id, user):
+    if not is_user_member(user["id"]):
+        send_join_lock(chat_id, get_user_lang(user["id"]))
+        return
     lang = get_user_lang(user["id"])
     send(chat_id, T("help", lang), main_menu(lang))
 
 
 def cmd_about(chat_id, user):
+    if not is_user_member(user["id"]):
+        send_join_lock(chat_id, get_user_lang(user["id"]))
+        return
     lang = get_user_lang(user["id"])
     send(chat_id, T("about", lang), main_menu(lang))
 
 
 def cmd_stats(chat_id, user):
+    if not is_user_member(user["id"]):
+        send_join_lock(chat_id, get_user_lang(user["id"]))
+        return
     lang = get_user_lang(user["id"])
     s = store.get_stats()
     me = store.data["users"].get(str(user["id"]), {})
@@ -544,6 +578,10 @@ def cmd_stats(chat_id, user):
 
 def handle_audio(chat_id, user, msg):
     lang = get_user_lang(user["id"])
+    if not is_user_member(user["id"]):
+        send_join_lock(chat_id, lang)
+        return
+
     audio = msg.get("audio") or msg.get("document")
     if not audio:
         return
@@ -569,11 +607,7 @@ def handle_audio(chat_id, user, msg):
         "orig_name": audio.get("file_name", "music" + ext),
         "title": audio.get("title"),
         "artist": audio.get("performer"),
-        "album": None,
-        "year": None,
-        "genre": None,
-        "track": None,
-        "cover": None,
+        "album": None, "year": None, "genre": None, "track": None, "cover": None,
     }
     store.set_session(user["id"], session)
     send(chat_id, T("file_received", lang, header=session_header(session, lang)), edit_menu(session, lang))
@@ -599,6 +633,23 @@ def handle_callback(cb):
     user = cb["from"]
     data = cb["data"]
     lang = get_user_lang(user["id"])
+
+    # ✅ چک عضویت برای همه دکمه‌ها (به‌جز خود دکمه‌های قفل)
+    if data not in ("check_membership",) and data != "help":
+        if not is_user_member(user["id"]):
+            answer_cb(cb["id"], T("not_joined", lang))
+            send_join_lock(chat_id, lang)
+            return
+
+    # دکمه «عضو شدم»
+    if data == "check_membership":
+        if is_user_member(user["id"], force_check=True):
+            answer_cb(cb["id"], "✅")
+            edit_msg(chat_id, msg_id, T("welcome_back", lang), main_menu(lang))
+        else:
+            answer_cb(cb["id"], T("not_joined", lang))
+            send_join_lock(chat_id, lang)
+        return
 
     if data == "back_main":
         answer_cb(cb["id"])
@@ -642,8 +693,9 @@ def handle_callback(cb):
 
     if data == "back":
         answer_cb(cb["id"])
-        text = T("file_received", lang, header=session_header(session, lang))
-        edit_msg(chat_id, msg_id, text, edit_menu(session, lang))
+        edit_msg(chat_id, msg_id,
+                 T("file_received", lang, header=session_header(session, lang)),
+                 edit_menu(session, lang))
         return
 
     if data == "search":
@@ -682,7 +734,7 @@ def handle_callback(cb):
                 img.save(cover_path, "JPEG", quality=88)
                 session["cover"] = str(cover_path)
             except Exception as e:
-                log.error(f"cover process error: {e}")
+                log.error(f"cover: {e}")
 
         store.set_session(user["id"], session)
         source = session.get("search_source", "")
@@ -718,41 +770,37 @@ def handle_callback(cb):
                 track=session.get("track"),
                 cover_path=session.get("cover"),
             )
-
             out = Path(session["file"])
             user_temp = TEMP / str(user["id"])
             user_temp.mkdir(exist_ok=True)
 
-            # ✅ اسم فایل فقط از روی اسم آهنگ ساخته می‌شه (نه خواننده)
+            # ✅ اسم فایل = فقط اسم آهنگ (بدون خواننده)
             final_title = (session.get("title") or "").strip()
-            final_artist = (session.get("artist") or "").strip()
-
             if final_title:
-                # اسم فایل = فقط اسم آهنگ
-                file_base = safe_filename(final_title)
+                clean_name = f"{final_title}{out.suffix}"
             else:
-                # اگه اسم آهنگ نداشتیم، از اسم اصلی فایل استفاده کن
-                file_base = safe_filename(Path(session.get("orig_name") or "music").stem)
+                clean_name = session.get("orig_name") or f"music{out.suffix}"
 
-            new_name = user_temp / f"{file_base}{out.suffix}"
+            for ch in ['/', '\\', ':', '*', '?', '"', '<', '>', '|']:
+                clean_name = clean_name.replace(ch, "_")
+
+            new_name = user_temp / clean_name
             out.rename(new_name)
 
             size_str = human_size(new_name.stat().st_size)
             edit_msg(chat_id, msg_id, T("uploading", lang, size=size_str))
 
             caption = T("caption_success", lang,
-                        title=final_title or "Music",
-                        artist=final_artist or "---",
+                        title=session.get("title") or "Music",
+                        artist=session.get("artist") or "---",
                         album=session.get("album") or "---")
 
             success = send_audio(
-                chat_id,
-                new_name,
+                chat_id, new_name,
                 caption=caption,
                 cover_path=session.get("cover"),
-                title=final_title or None,        # اسم آهنگ
-                performer=final_artist or None,   # اسم خواننده
-                album=session.get("album") or None,
+                title=session.get("title"),
+                performer=session.get("artist"),
             )
 
             if success:
@@ -786,6 +834,10 @@ def handle_callback(cb):
 # ============================================================
 def handle_text(chat_id, user, text):
     lang = get_user_lang(user["id"])
+    if not is_user_member(user["id"]):
+        send_join_lock(chat_id, lang)
+        return False
+
     session = store.get_session(user["id"])
     if not session or not session.get("awaiting"):
         return False
@@ -798,7 +850,6 @@ def handle_text(chat_id, user, text):
         send(chat_id, T("searching", lang))
 
         results, source = search_all_sources(text, limit=5)
-
         if not results:
             send(chat_id, T("search_empty", lang), edit_menu(session, lang))
             return True
@@ -818,6 +869,10 @@ def handle_text(chat_id, user, text):
 
 def handle_photo(chat_id, user, msg):
     lang = get_user_lang(user["id"])
+    if not is_user_member(user["id"]):
+        send_join_lock(chat_id, lang)
+        return
+
     session = store.get_session(user["id"])
     if not session:
         return
@@ -836,7 +891,7 @@ def handle_photo(chat_id, user, msg):
         img.thumbnail((800, 800))
         img.save(path, "JPEG", quality=88)
     except Exception as e:
-        log.error(f"cover error: {e}")
+        log.error(f"cover: {e}")
         send(chat_id, T("cover_error", lang))
         return
 
@@ -857,6 +912,7 @@ def setup_bot():
         log.error("❌ Invalid token!")
         sys.exit(1)
     log.info(f"✅ Connected: @{me['result']['username']}")
+    log.info(f"📢 Channel: {CHANNEL_USERNAME or '(disabled)'}")
     api("setMyCommands", commands=[
         {"command": "start", "description": "🏠 / شروع"},
         {"command": "help", "description": "📖 / راهنما"},
