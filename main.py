@@ -24,12 +24,33 @@ OFFSET_FILE = Path("offset.json")
 TEMP = Path("tmp")
 TEMP.mkdir(exist_ok=True)
 store = Store("state.json")
+session_http = requests.Session()
 
 
-# --- توابع ارتباط با تلگرام ---
+# ============================================================
+#                    توابع کمکی
+# ============================================================
+def human_size(b):
+    for unit in ["B", "KB", "MB", "GB"]:
+        if b < 1024:
+            return f"{b:.1f} {unit}"
+        b /= 1024
+    return f"{b:.1f} TB"
+
+
+def human_duration(seconds):
+    if not seconds:
+        return "---"
+    m, s = divmod(int(seconds), 60)
+    return f"{m}:{s:02d}"
+
+
+# ============================================================
+#                    توابع ارتباط با تلگرام
+# ============================================================
 def api(method, **params):
     try:
-        r = requests.post(f"{API}/{method}", json=params, timeout=60)
+        r = session_http.post(f"{API}/{method}", json=params, timeout=60)
         res = r.json()
         if not res.get("ok"):
             log.error(f"⚠️ خطای API در {method}: {res}")
@@ -44,6 +65,17 @@ def send(chat_id, text, keyboard=None, parse_mode="HTML"):
     if keyboard:
         data["reply_markup"] = {"inline_keyboard": keyboard}
     return api("sendMessage", **data)
+
+
+def send_photo_file(chat_id, photo_path, caption, keyboard=None, parse_mode="HTML"):
+    data = {"chat_id": chat_id, "caption": caption, "parse_mode": parse_mode}
+    if keyboard:
+        data["reply_markup"] = {"inline_keyboard": keyboard}
+    try:
+        with open(photo_path, "rb") as f:
+            requests.post(f"{API}/sendPhoto", data=data, files={"photo": f}, timeout=60)
+    except Exception as e:
+        log.error(f"خطا در ارسال عکس: {e}")
 
 
 def edit_msg(chat_id, msg_id, text, keyboard=None):
@@ -78,7 +110,7 @@ def download(file_id, name):
     url = f"https://api.telegram.org/file/bot{TOKEN}/{path}"
     dest = TEMP / name
     try:
-        r = requests.get(url, timeout=120)
+        r = session_http.get(url, timeout=180)
         dest.write_bytes(r.content)
         return dest
     except Exception as e:
@@ -87,112 +119,206 @@ def download(file_id, name):
 
 
 def send_audio(chat_id, path, caption="", cover_path=None):
-    try:
-        files = {"audio": open(path, "rb")}
-        data = {"chat_id": chat_id, "caption": caption}
+    """ارسال فایل با تلاش مجدد"""
+    for attempt in range(3):
+        files = {}
+        try:
+            log.info(f"📤 تلاش {attempt+1} برای آپلود ({human_size(Path(path).stat().st_size)})...")
+            files = {"audio": open(path, "rb")}
+            data = {"chat_id": chat_id, "caption": caption}
 
-        if cover_path and Path(cover_path).exists():
-            thumb_path = TEMP / "thumb.jpg"
-            img = Image.open(cover_path)
-            img = img.convert("RGB")
-            img.thumbnail((320, 320))
-            img.save(thumb_path, "JPEG", quality=85)
-            files["thumb"] = open(thumb_path, "rb")
+            if cover_path and Path(cover_path).exists():
+                thumb_path = TEMP / "thumb.jpg"
+                img = Image.open(cover_path)
+                img = img.convert("RGB")
+                img.thumbnail((320, 320))
+                img.save(thumb_path, "JPEG", quality=80)
+                files["thumb"] = open(thumb_path, "rb")
 
-        requests.post(f"{API}/sendAudio", data=data, files=files, timeout=180)
-    except Exception as e:
-        log.error(f"خطا در ارسال فایل: {e}")
-    finally:
-        for f in files.values():
-            try:
-                f.close()
-            except Exception:
-                pass
+            r = session_http.post(f"{API}/sendAudio", data=data, files=files, timeout=300)
+
+            for f in files.values():
+                try:
+                    f.close()
+                except Exception:
+                    pass
+
+            if r.status_code == 200:
+                log.info("✅ فایل ارسال شد.")
+                return True
+            log.error(f"خطا در ارسال: {r.text}")
+        except Exception as e:
+            log.error(f"❌ خطای شبکه در آپلود (تلاش {attempt+1}): {e}")
+            for f in files.values():
+                try:
+                    f.close()
+                except Exception:
+                    pass
+        time.sleep(2)
+    return False
 
 
-# --- دکمه‌های زیبا ---
+# ============================================================
+#                    منوها و کارت‌ها
+# ============================================================
 def main_menu():
     return [
-        [{"text": "🎵 راهنما", "callback_data": "help"},
-         {"text": "📊 آمار من", "callback_data": "my_stats"}]
+        [{"text": "🎵 راهنمای استفاده", "callback_data": "help"}],
+        [{"text": "📊 آمار من", "callback_data": "my_stats"},
+         {"text": "👑 درباره ما", "callback_data": "about"}],
     ]
 
 
+def session_header(session):
+    """هدیه کارت اطلاعات فایل - طراحی لوکس"""
+    name = session.get("orig_name", "---")
+    if len(name) > 30:
+        name = name[:27] + "..."
+    size = human_size(Path(session["file"]).stat().st_size) if Path(session["file"]).exists() else "---"
+    
+    filled = sum(1 for f in ["title", "artist", "album", "year", "genre", "track"] if session.get(f))
+    if session.get("cover"):
+        filled += 1
+    
+    return (
+        f"<blockquote>"
+        f"<b>🎧 فایل در حال ویرایش</b>\n"
+        f"├ نام: <code>{name}</code>\n"
+        f"├ حجم: <code>{size}</code>\n"
+        f"└ تغییرات: <b>{filled}</b> مورد"
+        f"</blockquote>"
+    )
+
+
 def edit_menu(session):
-    def mark(field):
-        return "✅ " if session.get(field) else "▫️ "
+    """منوی ادیت با طراحی لوکس و نشانگر وضعیت"""
+    def btn(field, emoji, label):
+        mark = "✅" if session.get(field) else "◽️"
+        return {"text": f"{emoji} {label} {mark}", "callback_data": f"f_{field}"}
+
     return [
-        [{"text": f"{mark('title')}🎵 اسم آهنگ", "callback_data": "f_title"},
-         {"text": f"{mark('artist')}🎤 خواننده", "callback_data": "f_artist"}],
-        [{"text": f"{mark('album')}💿 آلبوم", "callback_data": "f_album"},
-         {"text": f"{mark('year')}📅 سال", "callback_data": "f_year"}],
-        [{"text": f"{mark('genre')}🎼 ژانر", "callback_data": "f_genre"},
-         {"text": f"{mark('track')}🔢 شماره ترک", "callback_data": "f_track"}],
-        [{"text": f"{mark('cover')}🖼 کاور", "callback_data": "f_cover"}],
-        [{"text": "✅ پیش‌نمایش و تایید", "callback_data": "preview"},
-         {"text": "❌ لغو", "callback_data": "cancel"}],
+        [btn("title", "🎵", "اسم آهنگ"), btn("artist", "🎤", "خواننده")],
+        [btn("album", "💿", "آلبوم"), btn("year", "📅", "سال انتشار")],
+        [btn("genre", "🎼", "ژانر"), btn("track", "🔢", "شماره ترک")],
+        [btn("cover", "🖼", "کاور آهنگ")],
+        [{"text": "👁 پیش‌نمایش و تایید نهایی", "callback_data": "preview"}],
+        [{"text": "❌ انصراف از ادیت", "callback_data": "cancel"}],
     ]
 
 
 def preview_menu():
     return [
-        [{"text": "✅ بله، اعمال کن", "callback_data": "apply"},
-         {"text": "🔙 بازگشت", "callback_data": "back"}]
+        [{"text": "✨ بله، اعمال کن", "callback_data": "apply"}],
+        [{"text": "🔙 بازگشت به ویرایش", "callback_data": "back"}],
+        [{"text": "❌ انصراف", "callback_data": "cancel"}],
     ]
 
 
-# --- هندلرها ---
+# ============================================================
+#                    هندلرهای دستورات
+# ============================================================
 def cmd_start(chat_id, user):
     store.add_user(user["id"], user.get("first_name", ""))
     text = (
-        f"سلام <b>{user.get('first_name','')}</b> 👋\n\n"
-        "من ربات <b>ادیت تگ موزیک</b> هستم 🎧\n"
-        "فایل موزیکت رو بفرست تا اسم آهنگ، خواننده، کاور و بقیه تگ‌هاش رو عوض کنم.\n\n"
-        "📌 فرمت‌های پشتیبانی‌شده: MP3, FLAC, M4A\n"
-        "⚠️ حداکثر حجم فایل: 20MB"
+        f"<b>سلام {user.get('first_name','')} عزیز 👋</b>\n\n"
+        f"به <b>HiVo Tag Music</b> خوش آمدی 🎧\n"
+        f"من می‌تونم فایل موزیکت رو به یه اثر حرفه‌ای تبدیل کنم.\n\n"
+        f"<blockquote>"
+        f"<b>✨ قابلیت‌های من:</b>\n"
+        f"├ ویرایش کامل تگ‌های صوتی\n"
+        f"├ افزودن کاور با کیفیت بالا\n"
+        f"├ پشتیبانی از MP3, FLAC, M4A\n"
+        f"└ پردازش سریع و امن"
+        f"</blockquote>\n\n"
+        f"<i>برای شروع، فقط فایل موزیکت رو بفرست 👇</i>"
     )
-    send(chat_id, text, main_menu())
+    banner = Path("banner.jpg")
+    if banner.exists():
+        send_photo_file(chat_id, str(banner), text, main_menu())
+    else:
+        send(chat_id, text, main_menu())
 
 
 def cmd_help(chat_id):
     text = (
-        "📖 <b>راهنمای استفاده</b>\n\n"
-        "1️⃣ فایل موزیک رو بفرست\n"
-        "2️⃣ روی گزینه‌های مورد نظر بزن و مقدار جدید رو تایپ کن\n"
-        "3️⃣ برای کاور، عکس رو بفرست\n"
-        "4️⃣ در نهایت روی «پیش‌نمایش و تایید» بزن"
+        f"<b>📖 راهنمای کامل استفاده</b>\n\n"
+        f"<blockquote>"
+        f"<b>مرحله ۱:</b> فایل موزیک رو بفرست\n"
+        f"<b>مرحله ۲:</b> روی گزینه‌ها بزن و مقدار جدید رو تایپ کن\n"
+        f"<b>مرحله ۳:</b> برای کاور، عکس رو به‌صورت Photo بفرست\n"
+        f"<b>مرحله ۴:</b> پیش‌نمایش رو ببین و تایید کن\n"
+        f"<b>مرحله ۵:</b> فایل نهایی رو دریافت کن"
+        f"</blockquote>\n\n"
+        f"<b>💡 نکات مهم:</b>\n"
+        f"├ حداکثر حجم فایل: <b>20MB</b>\n"
+        f"├ سرعت آپلود بسته به حجم فایل متغیره\n"
+        f"└ همه تغییرات به‌صورت خودکار ذخیره می‌شه\n\n"
+        f"<i>اگه سوالی داری، به ادمین پیام بده 💬</i>"
     )
-    send(chat_id, text)
+    send(chat_id, text, main_menu())
+
+
+def cmd_about(chat_id):
+    text = (
+        f"<b>👑 درباره HiVo Tag Music</b>\n\n"
+        f"<blockquote>"
+        f"این ربات به‌صورت اختصاصی برای ویرایش حرفه‌ای\n"
+        f"تگ‌های موزیک طراحی شده و کاملاً رایگان است.\n"
+        f"</blockquote>\n\n"
+        f"<b>🔧 تکنولوژی:</b>\n"
+        f"├ Python + Telegram Bot API\n"
+        f"├ موتور پردازش Mutagen\n"
+        f"└ میزبانی روی GitHub Actions\n\n"
+        f"<i>ساخته شده با ❤️ برای موزیک‌دوستان</i>"
+    )
+    send(chat_id, text, main_menu())
 
 
 def cmd_stats(chat_id, user_id):
     s = store.get_stats()
     me = store.data["users"].get(str(user_id), {})
     text = (
-        f"📊 <b>آمار شما</b>\n\n"
-        f"👤 کاربر کل: <b>{s['users']}</b>\n"
-        f"🎵 فایل پردازش‌شده: <b>{s['files']}</b>\n"
-        f"📁 فایل‌های تو: <b>{me.get('files', 0)}</b>"
+        f"<b>📊 آمار و اطلاعات</b>\n\n"
+        f"<blockquote>"
+        f"<b>🌍 آمار کلی ربات:</b>\n"
+        f"├ کاربران: <b>{s['users']}</b>\n"
+        f"└ فایل‌های پردازش‌شده: <b>{s['files']}</b>"
+        f"</blockquote>\n"
+        f"<blockquote>"
+        f"<b>👤 آمار شخصی شما:</b>\n"
+        f"├ نام: <b>{me.get('name', '---')}</b>\n"
+        f"└ فایل‌های شما: <b>{me.get('files', 0)}</b>"
+        f"</blockquote>"
     )
-    send(chat_id, text)
+    send(chat_id, text, main_menu())
 
 
+# ============================================================
+#                    هندلر فایل صوتی
+# ============================================================
 def handle_audio(chat_id, user, msg):
     audio = msg.get("audio") or msg.get("document")
     if not audio:
         return
     size = audio.get("file_size", 0)
     if size > 20 * 1024 * 1024:
-        send(chat_id, "❌ فایل بزرگ‌تر از 20MB هست و تلگرام اجازه دانلودش رو نمی‌ده.")
+        send(
+            chat_id,
+            "<b>❌ فایل بزرگ‌تر از 20MB است</b>\n\n"
+            "<i>متاسفانه تلگرام اجازه دانلود فایل‌های بزرگ‌تر رو به ربات‌ها نمی‌ده.</i>",
+        )
         return
 
     ext = ".mp3"
     if audio.get("file_name"):
         ext = Path(audio["file_name"]).suffix or ".mp3"
+
     tmp_name = f"{user['id']}_{int(time.time())}{ext}"
+    send(chat_id, "📥 <b>در حال دریافت فایل...</b>\n<i>لطفاً صبر کن</i>")
+
     path = download(audio["file_id"], tmp_name)
     if not path:
-        send(chat_id, "❌ خطا در دانلود فایل.")
+        send(chat_id, "❌ <b>خطا در دریافت فایل</b>\nلطفاً دوباره تلاش کن.")
         return
 
     session = {
@@ -207,24 +333,29 @@ def handle_audio(chat_id, user, msg):
         "cover": None,
     }
     store.set_session(user["id"], session)
-    send(
-        chat_id,
-        "🎵 <b>فایل دریافت شد!</b>\nحالا گزینه‌هایی که می‌خوای عوض کنی رو انتخاب کن 👇",
-        edit_menu(session),
+
+    text = (
+        f"<b>✅ فایل با موفقیت دریافت شد!</b>\n\n"
+        f"{session_header(session)}\n\n"
+        f"<i>حالا روی گزینه‌هایی که می‌خوای عوض کنی بزن 👇</i>"
     )
+    send(chat_id, text, edit_menu(session))
 
 
 FIELD_NAMES = {
-    "f_title": ("title", "📝 <b>اسم آهنگ جدید</b> رو بنویس:"),
-    "f_artist": ("artist", "🎤 <b>اسم خواننده جدید</b> رو بنویس:"),
-    "f_album": ("album", "💿 <b>اسم آلبوم جدید</b> رو بنویس:"),
-    "f_year": ("year", "📅 <b>سال انتشار</b> (مثلاً 2025):"),
-    "f_genre": ("genre", "🎼 <b>ژانر</b> (مثلاً Pop, Rock):"),
-    "f_track": ("track", "🔢 <b>شماره ترک</b> (مثلاً 1):"),
-    "f_cover": ("cover", "🖼 <b>عکس کاور</b> رو بفرست (به‌صورت Photo):"),
+    "f_title": ("title", "🎵 <b>اسم جدید آهنگ</b> رو بنویس:\n\n<i>مثال: Shape of You</i>"),
+    "f_artist": ("artist", "🎤 <b>اسم جدید خواننده</b> رو بنویس:\n\n<i>مثال: Ed Sheeran</i>"),
+    "f_album": ("album", "💿 <b>اسم جدید آلبوم</b> رو بنویس:\n\n<i>مثال: Divide</i>"),
+    "f_year": ("year", "📅 <b>سال انتشار</b> رو بنویس:\n\n<i>مثال: 2017</i>"),
+    "f_genre": ("genre", "🎼 <b>ژانر موزیک</b> رو بنویس:\n\n<i>مثال: Pop, Rock, Hip-Hop</i>"),
+    "f_track": ("track", "🔢 <b>شماره ترک</b> رو بنویس:\n\n<i>مثال: 1</i>"),
+    "f_cover": ("cover", "🖼 <b>عکس کاور</b> رو بفرست\n\n<i>به‌صورت Photo یا Document</i>"),
 }
 
 
+# ============================================================
+#                    هندلر دکمه‌ها
+# ============================================================
 def handle_callback(cb):
     chat_id = cb["message"]["chat"]["id"]
     msg_id = cb["message"]["message_id"]
@@ -239,39 +370,52 @@ def handle_callback(cb):
         answer_cb(cb["id"])
         cmd_stats(chat_id, user["id"])
         return
+    if data == "about":
+        answer_cb(cb["id"])
+        cmd_about(chat_id)
+        return
     if data == "cancel":
-        answer_cb(cb["id"], "لغو شد")
+        answer_cb(cb["id"], "❌ لغو شد")
         store.clear_session(user["id"])
-        edit_msg(chat_id, msg_id, "❌ عملیات لغو شد.")
+        edit_msg(chat_id, msg_id, "❌ <b>عملیات لغو شد</b>\n\n<i>هر وقت خواستی، فایل جدید بفرست.</i>")
         return
 
     session = store.get_session(user["id"])
     if not session:
-        answer_cb(cb["id"], "سشن منقضی شده، فایل رو دوباره بفرست.")
+        answer_cb(cb["id"], "⚠️ سشن منقضی شده، فایل رو دوباره بفرست")
         return
 
     if data == "back":
         answer_cb(cb["id"])
-        edit_msg(chat_id, msg_id, "🎵 <b>فایل دریافت شد!</b>\nگزینه‌های مورد نظر رو انتخاب کن 👇", edit_menu(session))
+        edit_msg(
+            chat_id,
+            msg_id,
+            f"<b>🎧 فایل در حال ویرایش</b>\n\n{session_header(session)}\n\n<i>گزینه‌های مورد نظر رو انتخاب کن 👇</i>",
+            edit_menu(session),
+        )
         return
 
     if data == "preview":
         answer_cb(cb["id"])
-        p = "📋 <b>پیش‌نمایش تغییرات:</b>\n\n"
-        p += f"🎵 اسم آهنگ: <code>{session.get('title') or '---'}</code>\n"
-        p += f"🎤 خواننده: <code>{session.get('artist') or '---'}</code>\n"
-        p += f"💿 آلبوم: <code>{session.get('album') or '---'}</code>\n"
-        p += f"📅 سال: <code>{session.get('year') or '---'}</code>\n"
-        p += f"🎼 ژانر: <code>{session.get('genre') or '---'}</code>\n"
-        p += f"🔢 ترک: <code>{session.get('track') or '---'}</code>\n"
-        p += f"🖼 کاور: {'✅ دارد' if session.get('cover') else '❌ ندارد'}\n\n"
-        p += "آیا از اعمال این تغییرات مطمئنی؟"
+        p = f"<b>👁 پیش‌نمایش تغییرات نهایی</b>\n\n"
+        p += "<blockquote>"
+        p += f"🎵 <b>اسم آهنگ:</b> <code>{session.get('title') or '---'}</code>\n"
+        p += f"🎤 <b>خواننده:</b> <code>{session.get('artist') or '---'}</code>\n"
+        p += f"💿 <b>آلبوم:</b> <code>{session.get('album') or '---'}</code>\n"
+        p += f"📅 <b>سال:</b> <code>{session.get('year') or '---'}</code>\n"
+        p += f"🎼 <b>ژانر:</b> <code>{session.get('genre') or '---'}</code>\n"
+        p += f"🔢 <b>شماره ترک:</b> <code>{session.get('track') or '---'}</code>\n"
+        p += f"🖼 <b>کاور:</b> {'✅ تنظیم شده' if session.get('cover') else '❌ تنظیم نشده'}"
+        p += "</blockquote>\n\n"
+        p += "<i>آیا از اعمال این تغییرات اطمینان داری؟</i>"
         edit_msg(chat_id, msg_id, p, preview_menu())
         return
 
     if data == "apply":
-        answer_cb(cb["id"], "در حال پردازش...")
-        edit_msg(chat_id, msg_id, "⏳ <b>در حال اعمال تگ‌ها، لطفاً صبر کن...</b>")
+        answer_cb(cb["id"], "⏳ در حال پردازش...")
+
+        # مرحله ۱: ادیت تگ‌ها
+        edit_msg(chat_id, msg_id, "⏳ <b>[۱/۳] در حال اعمال تگ‌ها...</b>\n<i>موتور Mutagen در حال کاره</i>")
         try:
             edit_tags(
                 file_path=session["file"],
@@ -286,15 +430,56 @@ def handle_callback(cb):
             out = Path(session["file"])
             new_name = TEMP / f"tagged_{session['orig_name']}"
             out.rename(new_name)
-            send_audio(chat_id, new_name, caption="✅ <b>تگ‌ها با موفقیت اعمال شد!</b>", cover_path=session.get("cover"))
-            store.inc_files(user["id"])
+
+            # مرحله ۲: آپلود
+            size_str = human_size(new_name.stat().st_size)
+            edit_msg(
+                chat_id,
+                msg_id,
+                f"✅ <b>[۲/۳] تگ‌ها اعمال شد</b>\n\n"
+                f"📤 <b>[۳/۳] در حال آپلود فایل...</b>\n"
+                f"<blockquote>حجم فایل: <b>{size_str}</b>\n"
+                f"<i>بسته به سرعت گیت‌هاب، ممکنه ۱ تا ۲ دقیقه طول بکشه</i></blockquote>",
+            )
+
+            success = send_audio(
+                chat_id,
+                new_name,
+                caption=(
+                    f"✅ <b>تگ‌ها با موفقیت اعمال شد!</b>\n\n"
+                    f"<blockquote>"
+                    f"🎵 <b>{session.get('title') or session.get('orig_name', 'Music')}</b>\n"
+                    f"🎤 {session.get('artist') or 'نامشخص'}\n"
+                    f"</blockquote>"
+                ),
+                cover_path=session.get("cover"),
+            )
+
+            if success:
+                store.inc_files(user["id"])
+                edit_msg(
+                    chat_id,
+                    msg_id,
+                    "✨ <b>عملیات با موفقیت به پایان رسید!</b>\n\n"
+                    "<i>ممنون که از HiVo Tag Music استفاده کردی 🎧</i>",
+                )
+            else:
+                edit_msg(
+                    chat_id,
+                    msg_id,
+                    "❌ <b>خطا در آپلود فایل به تلگرام</b>\n\n"
+                    "<i>لطفاً دوباره فایل رو بفرست و مجدداً تلاش کن.</i>",
+                )
+
             try:
                 new_name.unlink()
             except Exception:
                 pass
+
         except Exception as e:
             log.exception("tag error")
-            send(chat_id, f"❌ خطا در ادیت: <code>{e}</code>")
+            send(chat_id, f"❌ <b>خطا در پردازش:</b>\n<code>{e}</code>")
+
         store.clear_session(user["id"])
         return
 
@@ -307,6 +492,9 @@ def handle_callback(cb):
         return
 
 
+# ============================================================
+#                    هندلر متن و عکس
+# ============================================================
 def handle_text(chat_id, user, text):
     session = store.get_session(user["id"])
     if not session or not session.get("awaiting"):
@@ -315,7 +503,13 @@ def handle_text(chat_id, user, text):
     session[field] = text.strip()
     session.pop("awaiting", None)
     store.set_session(user["id"], session)
-    send(chat_id, f"✅ ثبت شد: <b>{text}</b>\n\nحالا تغییرات دیگه‌ای اعمال کن یا پیش‌نمایش رو بزن.", edit_menu(session))
+
+    send(
+        chat_id,
+        f"✅ <b>ثبت شد:</b> <code>{text}</code>\n\n"
+        f"<i>تغییرات دیگه‌ای اعمال کن یا پیش‌نمایش رو بزن 👇</i>",
+        edit_menu(session),
+    )
     return True
 
 
@@ -329,15 +523,15 @@ def handle_photo(chat_id, user, msg):
 
     path = download(photo["file_id"], f"cover_{user['id']}.jpg")
     if not path:
-        send(chat_id, "❌ خطا در دانلود کاور")
+        send(chat_id, "❌ خطا در دریافت کاور")
         return
 
     try:
         img = Image.open(path)
         img = img.convert("RGB")
-        img.thumbnail((1000, 1000))
-        img.save(path, "JPEG")
-        log.info(f"Cover converted to JPEG: {path}")
+        img.thumbnail((800, 800))
+        img.save(path, "JPEG", quality=88)
+        log.info(f"Cover optimized: {path} ({human_size(path.stat().st_size)})")
     except Exception as e:
         log.error(f"خطا در تبدیل کاور: {e}")
         send(chat_id, "❌ خطا در پردازش عکس کاور")
@@ -346,18 +540,42 @@ def handle_photo(chat_id, user, msg):
     session["cover"] = str(path)
     session.pop("awaiting", None)
     store.set_session(user["id"], session)
-    send(chat_id, "🖼 <b>کاور با موفقیت ثبت شد!</b>", edit_menu(session))
+    send(
+        chat_id,
+        "🖼 <b>کاور با موفقیت ثبت شد!</b>\n\n<i>حالا می‌تونی تغییرات دیگه‌ای بدی یا پیش‌نمایش رو بزنی 👇</i>",
+        edit_menu(session),
+    )
 
 
-# --- حلقه اصلی ---
+# ============================================================
+#                    راه‌اندازی و حلقه اصلی
+# ============================================================
 def setup_bot():
     log.info("🚀 شروع راه‌اندازی ربات...")
     api("deleteWebhook", drop_pending_updates=False)
+
     me = api("getMe")
     if not me.get("ok"):
         log.error("❌ توکن ربات نامعتبر است!")
         sys.exit(1)
-    log.info(f"✅ ربات با موفقیت متصل شد: @{me['result']['username']}")
+    log.info(f"✅ ربات متصل شد: @{me['result']['username']}")
+
+    # --- منوی دستورات ---
+    api(
+        "setMyCommands",
+        commands=[
+            {"command": "start", "description": "🏠 شروع مجدد"},
+            {"command": "help", "description": "📖 راهنمای استفاده"},
+            {"command": "stats", "description": "📊 آمار ربات"},
+        ],
+    )
+
+    # --- دکمه منوی شیشه‌ای ---
+    api(
+        "setChatMenuButton",
+        menu_button={"type": "commands"},
+    )
+    log.info("✅ منو و دکمه‌ها تنظیم شد.")
 
 
 def main():
@@ -400,7 +618,14 @@ def main():
                                 cmd_stats(chat_id, user["id"])
                             elif t.startswith("/admin") and user["id"] == ADMIN_ID:
                                 s = store.get_stats()
-                                send(chat_id, f"👑 <b>پنل ادمین</b>\n\n👥 کاربران: {s['users']}\n🎵 فایل‌ها: {s['files']}")
+                                send(
+                                    chat_id,
+                                    f"👑 <b>پنل ادمین</b>\n\n"
+                                    f"<blockquote>"
+                                    f"👥 کاربران: <b>{s['users']}</b>\n"
+                                    f"🎵 فایل‌ها: <b>{s['files']}</b>"
+                                    f"</blockquote>",
+                                )
                             else:
                                 handle_text(chat_id, user, t)
 
