@@ -175,6 +175,13 @@ def short_name(name, maxlen=32):
     return name if len(name) <= maxlen else name[:maxlen - 3] + "..."
 
 
+def safe_filename(name):
+    """پاکسازی اسم فایل از کاراکترهای غیرمجاز"""
+    for ch in ['/', '\\', ':', '*', '?', '"', '<', '>', '|', '\n', '\r', '\t']:
+        name = name.replace(ch, "_")
+    return name.strip() or "music"
+
+
 def api(method, **params):
     try:
         r = session_http.post(f"{API}/{method}", json=params, timeout=60)
@@ -245,7 +252,13 @@ def download(file_id, name):
         return None
 
 
-def send_audio(chat_id, path, caption="", cover_path=None):
+def send_audio(chat_id, path, caption="", cover_path=None, title=None, performer=None, album=None):
+    """
+    ارسال فایل صوتی با اطلاعات کامل:
+    - title = اسم آهنگ
+    - performer = اسم خواننده
+    - album = اسم آلبوم
+    """
     for attempt in range(3):
         files = {}
         try:
@@ -256,6 +269,14 @@ def send_audio(chat_id, path, caption="", cover_path=None):
                 "caption": caption,
                 "parse_mode": "HTML",
             }
+            # ✅ اطلاعاتی که تلگرام برای نمایش استفاده می‌کنه
+            if title:
+                data["title"] = title[:64]
+            if performer:
+                data["performer"] = performer[:64]
+            if album:
+                data["album"] = album[:64]
+
             if cover_path and Path(cover_path).exists():
                 thumb_path = TEMP / "thumb.jpg"
                 img = Image.open(cover_path)
@@ -263,12 +284,15 @@ def send_audio(chat_id, path, caption="", cover_path=None):
                 img.thumbnail((320, 320))
                 img.save(thumb_path, "JPEG", quality=82)
                 files["thumb"] = open(thumb_path, "rb")
+
             r = session_http.post(f"{API}/sendAudio", data=data, files=files, timeout=300)
+
             for f in files.values():
                 try:
                     f.close()
                 except Exception:
                     pass
+
             if r.status_code == 200:
                 log.info("✅ Sent.")
                 return True
@@ -694,23 +718,42 @@ def handle_callback(cb):
                 track=session.get("track"),
                 cover_path=session.get("cover"),
             )
+
             out = Path(session["file"])
-            # ✅ اسم فایل حفظ می‌شه، فقط داخل پوشه‌ی مخصوص همون کاربر ذخیره می‌شه
             user_temp = TEMP / str(user["id"])
             user_temp.mkdir(exist_ok=True)
-            original_name = session.get("orig_name") or ("music" + out.suffix)
-            new_name = user_temp / original_name
+
+            # ✅ اسم فایل فقط از روی اسم آهنگ ساخته می‌شه (نه خواننده)
+            final_title = (session.get("title") or "").strip()
+            final_artist = (session.get("artist") or "").strip()
+
+            if final_title:
+                # اسم فایل = فقط اسم آهنگ
+                file_base = safe_filename(final_title)
+            else:
+                # اگه اسم آهنگ نداشتیم، از اسم اصلی فایل استفاده کن
+                file_base = safe_filename(Path(session.get("orig_name") or "music").stem)
+
+            new_name = user_temp / f"{file_base}{out.suffix}"
             out.rename(new_name)
 
             size_str = human_size(new_name.stat().st_size)
             edit_msg(chat_id, msg_id, T("uploading", lang, size=size_str))
 
             caption = T("caption_success", lang,
-                        title=session.get("title") or "Music",
-                        artist=session.get("artist") or "---",
+                        title=final_title or "Music",
+                        artist=final_artist or "---",
                         album=session.get("album") or "---")
 
-            success = send_audio(chat_id, new_name, caption=caption, cover_path=session.get("cover"))
+            success = send_audio(
+                chat_id,
+                new_name,
+                caption=caption,
+                cover_path=session.get("cover"),
+                title=final_title or None,        # اسم آهنگ
+                performer=final_artist or None,   # اسم خواننده
+                album=session.get("album") or None,
+            )
 
             if success:
                 store.inc_files(user["id"])
