@@ -2,71 +2,17 @@
   "users": {
     "8343701928": {
       "name": ".",
-      "files": 5,
+      "files": 6,
+      "joined": null
+    },
+    "7862983298": {
+      "name": "ٓ",
+      "files": 2,
       "joined": null
     }
   },
   "stats": {
-    "total_files": 5
+    "total_files": 8
   },
-  "sessions": {
-    "8343701928": {
-      "file": "tmp/8343701928_1789377976.mp3",
-      "orig_name": "tagged_tagged_ADEM_TEPE_PIRSA_TE_Official_Music_Video_Adem_Tepe_.mp3",
-      "title": "PIRSA TE",
-      "artist": "Adem Tepe",
-      "album": null,
-      "year": null,
-      "genre": null,
-      "track": null,
-      "cover": null,
-      "search_results": [
-        {
-          "title": "Tepe",
-          "artist": "Momo \"Wandel\" Soumah",
-          "album": "Matchowé",
-          "year": "1991",
-          "genre": "",
-          "release_id": "715e164e-553a-4daa-a322-1c534c0f000b",
-          "length": 454000
-        },
-        {
-          "title": "Tepe",
-          "artist": "Konstrukt",
-          "album": "Certified Tonk #002",
-          "year": "2022",
-          "genre": "",
-          "release_id": "4459bade-8eb9-4cff-9077-28e96fd464d6",
-          "length": 0
-        },
-        {
-          "title": "Tepe",
-          "artist": "Konstrukt",
-          "album": "Dolunay",
-          "year": "2017",
-          "genre": "",
-          "release_id": "adc3d29c-cfdc-4f26-8386-8b94bfdb4baf",
-          "length": 203807
-        },
-        {
-          "title": "Tepe",
-          "artist": "konstruKt",
-          "album": "Kompile Karga 2",
-          "year": "2011",
-          "genre": "",
-          "release_id": "554af159-f768-4912-abe8-9f7d2b93b07a",
-          "length": 160000
-        },
-        {
-          "title": "Tepe",
-          "artist": "konstruKt",
-          "album": "Dolunay",
-          "year": "2022",
-          "genre": "",
-          "release_id": "d99e7248-3f92-4c9b-bcd7-b50a3ffda15a",
-          "length": 207000
-        }
-      ]
-    }
-  }
+  "sessions": {}
 }
