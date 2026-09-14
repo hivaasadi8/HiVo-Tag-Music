@@ -162,9 +162,6 @@ def set_user_lang(user_id, lang):
         store.save()
 
 
-# ============================================================
-#                    توابع کمکی
-# ============================================================
 def human_size(b):
     b = float(b)
     for unit in ["B", "KB", "MB", "GB"]:
@@ -178,9 +175,6 @@ def short_name(name, maxlen=32):
     return name if len(name) <= maxlen else name[:maxlen - 3] + "..."
 
 
-# ============================================================
-#                    Telegram API
-# ============================================================
 def api(method, **params):
     try:
         r = session_http.post(f"{API}/{method}", json=params, timeout=60)
@@ -295,7 +289,6 @@ def send_audio(chat_id, path, caption="", cover_path=None):
 # ============================================================
 
 def search_itunes(query, limit=5):
-    """منبع ۱: iTunes Search API (رایگان و بدون کلید)"""
     url = "https://itunes.apple.com/search"
     params = {"term": query, "media": "music", "entity": "song", "limit": limit}
     try:
@@ -324,7 +317,6 @@ def search_itunes(query, limit=5):
 
 
 def search_ytmusic(query, limit=5):
-    """منبع ۲: YouTube Music (ytmusicapi - بدون کلید API)"""
     try:
         from ytmusicapi import YTMusic
         yt = YTMusic()
@@ -340,7 +332,6 @@ def search_ytmusic(query, limit=5):
             year = ""
             if album.get("year"):
                 year = str(album["year"])
-            # کاور از طریق thumbnails
             thumbnails = item.get("thumbnails", [])
             artwork = thumbnails[-1]["url"] if thumbnails else ""
             out.append({
@@ -355,7 +346,7 @@ def search_ytmusic(query, limit=5):
             })
         return out
     except ImportError:
-        log.warning("ytmusicapi نصب نیست، از این منبع صرف‌نظر می‌شود.")
+        log.warning("ytmusicapi نصب نیست.")
         return []
     except Exception as e:
         log.error(f"YouTube Music error: {e}")
@@ -363,7 +354,6 @@ def search_ytmusic(query, limit=5):
 
 
 def search_musicbrainz(query, limit=5):
-    """منبع ۳: MusicBrainz (رایگان و بدون کلید)"""
     url = "https://musicbrainz.org/ws/2/recording/"
     params = {"query": query, "fmt": "json", "limit": limit}
     try:
@@ -396,51 +386,22 @@ def search_musicbrainz(query, limit=5):
 
 
 def search_soundcloud(query, limit=5):
-    """منبع ۴: SoundCloud (از طریق API عمومی)"""
-    try:
-        # SoundCloud نیاز به client_id داره، ولی می‌تونیم از API عمومی استفاده کنیم
-        # در صورت نیاز می‌شه client_id رو از یه منبع عمومی گرفت
-        log.info("SoundCloud search skipped (needs client_id)")
-        return []
-    except Exception as e:
-        log.error(f"SoundCloud error: {e}")
-        return []
+    return []
 
 
 def search_all_sources(query, limit=5):
-    """جستجو در همه منابع به ترتیب اولویت"""
-    log.info(f"🔍 Searching all sources for: {query}")
-
-    # منبع ۱: iTunes
-    results = search_itunes(query, limit)
-    if results:
-        log.info(f"✅ iTunes found {len(results)} results")
-        return results, "iTunes"
-
-    # منبع ۲: YouTube Music
-    results = search_ytmusic(query, limit)
-    if results:
-        log.info(f"✅ YouTube Music found {len(results)} results")
-        return results, "YouTube Music"
-
-    # منبع ۳: MusicBrainz
-    results = search_musicbrainz(query, limit)
-    if results:
-        log.info(f"✅ MusicBrainz found {len(results)} results")
-        return results, "MusicBrainz"
-
-    # منبع ۴: SoundCloud
-    results = search_soundcloud(query, limit)
-    if results:
-        log.info(f"✅ SoundCloud found {len(results)} results")
-        return results, "SoundCloud"
-
-    log.info("❌ No results found in any source")
+    log.info(f"🔍 Searching all sources: {query}")
+    for name, fn in [("iTunes", search_itunes), ("YouTube Music", search_ytmusic),
+                     ("MusicBrainz", search_musicbrainz), ("SoundCloud", search_soundcloud)]:
+        results = fn(query, limit)
+        if results:
+            log.info(f"✅ {name} found {len(results)}")
+            return results, name
+    log.info("❌ No results.")
     return [], ""
 
 
 def fetch_cover_art(artwork_url, dest_path):
-    """دانلود کاور از لینک"""
     if not artwork_url:
         return False
     try:
@@ -557,9 +518,6 @@ def cmd_stats(chat_id, user):
     send(chat_id, text, main_menu(lang))
 
 
-# ============================================================
-#                    فایل صوتی
-# ============================================================
 def handle_audio(chat_id, user, msg):
     lang = get_user_lang(user["id"])
     audio = msg.get("audio") or msg.get("document")
@@ -689,8 +647,6 @@ def handle_callback(cb):
         session["year"] = r["year"]
         if r.get("genre"):
             session["genre"] = r["genre"]
-        if r.get("track"):
-            session["track"] = r["track"]
 
         edit_msg(chat_id, msg_id, T("searching", lang))
         cover_path = TEMP / f"cover_mb_{user['id']}.jpg"
@@ -739,7 +695,11 @@ def handle_callback(cb):
                 cover_path=session.get("cover"),
             )
             out = Path(session["file"])
-            new_name = TEMP / f"tagged_{session['orig_name']}"
+            # ✅ اسم فایل حفظ می‌شه، فقط داخل پوشه‌ی مخصوص همون کاربر ذخیره می‌شه
+            user_temp = TEMP / str(user["id"])
+            user_temp.mkdir(exist_ok=True)
+            original_name = session.get("orig_name") or ("music" + out.suffix)
+            new_name = user_temp / original_name
             out.rename(new_name)
 
             size_str = human_size(new_name.stat().st_size)
@@ -797,22 +757,13 @@ def handle_text(chat_id, user, text):
         results, source = search_all_sources(text, limit=5)
 
         if not results:
-            # 🚀 پیام "پیدا نشد" + هدایت به ورود دستی
-            send(
-                chat_id,
-                T("search_empty", lang),
-                edit_menu(session, lang),
-            )
+            send(chat_id, T("search_empty", lang), edit_menu(session, lang))
             return True
 
         session["search_results"] = results
         session["search_source"] = source
         store.set_session(user["id"], session)
-        send(
-            chat_id,
-            T("search_results", lang, count=len(results)),
-            search_results_menu(results, lang),
-        )
+        send(chat_id, T("search_results", lang, count=len(results)), search_results_menu(results, lang))
         return True
 
     session[field] = text
