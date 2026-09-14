@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import time
 import logging
@@ -7,10 +8,19 @@ import requests
 from tagger import edit_tags
 from store import Store
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+# --- تنظیم لاگ ---
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s"
+)
 log = logging.getLogger(__name__)
 
-TOKEN = os.environ["TELEGRAM_TOKEN"]
+# --- چک کردن توکن ---
+TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
+if not TOKEN:
+    log.error("❌ خطا: متغیر TELEGRAM_TOKEN پیدا نشد! به Secrets گیت‌هاب برو و اضافه‌اش کن.")
+    sys.exit(1)
+
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 API = f"https://api.telegram.org/bot{TOKEN}"
 OFFSET_FILE = Path("offset.json")
@@ -19,16 +29,17 @@ TEMP.mkdir(exist_ok=True)
 
 store = Store("state.json")
 
-
-# ---------- Telegram helpers ----------
+# --- توابع ارتباط با تلگرام ---
 def api(method, **params):
     try:
         r = requests.post(f"{API}/{method}", json=params, timeout=60)
-        return r.json()
+        res = r.json()
+        if not res.get("ok"):
+            log.error(f"⚠️ خطای API در {method}: {res}")
+        return res
     except Exception as e:
-        log.error(f"API error {method}: {e}")
-        return {}
-
+        log.error(f"❌ خطای شبکه در {method}: {e}")
+        return {"ok": False}
 
 def send(chat_id, text, keyboard=None, parse_mode="HTML"):
     data = {"chat_id": chat_id, "text": text, "parse_mode": parse_mode}
@@ -36,57 +47,60 @@ def send(chat_id, text, keyboard=None, parse_mode="HTML"):
         data["reply_markup"] = {"inline_keyboard": keyboard}
     return api("sendMessage", **data)
 
-
 def edit_msg(chat_id, msg_id, text, keyboard=None):
     data = {"chat_id": chat_id, "message_id": msg_id, "text": text, "parse_mode": "HTML"}
     if keyboard:
         data["reply_markup"] = {"inline_keyboard": keyboard}
     return api("editMessageText", **data)
 
-
 def answer_cb(cb_id, text=""):
     api("answerCallbackQuery", callback_query_id=cb_id, text=text)
 
-
 def get_offset():
     if OFFSET_FILE.exists():
-        return json.loads(OFFSET_FILE.read_text()).get("offset", 0)
+        try:
+            return json.loads(OFFSET_FILE.read_text()).get("offset", 0)
+        except Exception:
+            return 0
     return 0
-
 
 def save_offset(o):
     OFFSET_FILE.write_text(json.dumps({"offset": o}))
 
-
 def download(file_id, name):
     info = api("getFile", file_id=file_id)
     if not info.get("ok"):
+        log.error(f"خطا در getFile: {info}")
         return None
     path = info["result"]["file_path"]
     url = f"https://api.telegram.org/file/bot{TOKEN}/{path}"
     dest = TEMP / name
-    r = requests.get(url, timeout=120)
-    dest.write_bytes(r.content)
-    return dest
-
+    try:
+        r = requests.get(url, timeout=120)
+        dest.write_bytes(r.content)
+        return dest
+    except Exception as e:
+        log.error(f"خطا در دانلود فایل: {e}")
+        return None
 
 def send_audio(chat_id, path, caption=""):
-    with open(path, "rb") as f:
-        requests.post(
-            f"{API}/sendAudio",
-            data={"chat_id": chat_id, "caption": caption},
-            files={"audio": f},
-            timeout=180
-        )
+    try:
+        with open(path, "rb") as f:
+            requests.post(
+                f"{API}/sendAudio",
+                data={"chat_id": chat_id, "caption": caption},
+                files={"audio": f},
+                timeout=180
+            )
+    except Exception as e:
+        log.error(f"خطا در ارسال فایل: {e}")
 
-
-# ---------- Keyboards ----------
+# --- دکمه‌ها ---
 def main_menu():
     return [
         [{"text": "🎵 راهنما", "callback_data": "help"},
          {"text": "📊 آمار من", "callback_data": "my_stats"}],
     ]
-
 
 def edit_menu(session):
     def mark(field):
@@ -103,8 +117,7 @@ def edit_menu(session):
          {"text": "❌ لغو", "callback_data": "cancel"}],
     ]
 
-
-# ---------- Command handlers ----------
+# --- هندلرها ---
 def cmd_start(chat_id, user):
     store.add_user(user["id"], user.get("first_name", ""))
     text = (
@@ -116,7 +129,6 @@ def cmd_start(chat_id, user):
     )
     send(chat_id, text, main_menu())
 
-
 def cmd_help(chat_id):
     text = (
         "📖 <b>راهنما</b>\n\n"
@@ -126,7 +138,6 @@ def cmd_help(chat_id):
         "4️⃣ آخرش روی «اعمال تگ‌ها» بزن تا فایل ادیت‌شده رو بگیری"
     )
     send(chat_id, text)
-
 
 def cmd_stats(chat_id, user_id):
     s = store.get_stats()
@@ -139,8 +150,6 @@ def cmd_stats(chat_id, user_id):
     )
     send(chat_id, text)
 
-
-# ---------- File handler ----------
 def handle_audio(chat_id, user, msg):
     audio = msg.get("audio") or msg.get("document")
     if not audio:
@@ -153,8 +162,8 @@ def handle_audio(chat_id, user, msg):
     ext = ".mp3"
     if audio.get("file_name"):
         ext = Path(audio["file_name"]).suffix or ".mp3"
-    tmp_path = TEMP / f"{user['id']}_{int(time.time())}{ext}"
-    path = download(audio["file_id"], tmp_path.name)
+    tmp_name = f"{user['id']}_{int(time.time())}{ext}"
+    path = download(audio["file_id"], tmp_name)
     if not path:
         send(chat_id, "❌ خطا در دانلود فایل.")
         return
@@ -175,8 +184,6 @@ def handle_audio(chat_id, user, msg):
         edit_menu(session)
     )
 
-
-# ---------- Callback handler ----------
 FIELD_NAMES = {
     "f_title": ("title", "📝 اسم آهنگ جدید رو بنویس:"),
     "f_artist": ("artist", "🎤 اسم خواننده جدید رو بنویس:"),
@@ -186,7 +193,6 @@ FIELD_NAMES = {
     "f_track": ("track", "🔢 شماره ترک (مثلاً 1):"),
     "f_cover": ("cover", "🖼 عکس کاور رو بفرست (به‌صورت Photo یا Document):"),
 }
-
 
 def handle_callback(cb):
     chat_id = cb["message"]["chat"]["id"]
@@ -251,8 +257,6 @@ def handle_callback(cb):
         send(chat_id, prompt)
         return
 
-
-# ---------- Text / Photo handler ----------
 def handle_text(chat_id, user, text):
     session = store.get_session(user["id"])
     if not session or not session.get("awaiting"):
@@ -263,7 +267,6 @@ def handle_text(chat_id, user, text):
     store.set_session(user["id"], session)
     send(chat_id, f"✅ ثبت شد: <b>{text}</b>", edit_menu(session))
     return True
-
 
 def handle_photo(chat_id, user, msg):
     session = store.get_session(user["id"])
@@ -281,66 +284,88 @@ def handle_photo(chat_id, user, msg):
     store.set_session(user["id"], session)
     send(chat_id, "🖼 کاور ثبت شد", edit_menu(session))
 
+# --- حلقه اصلی ---
+def setup_bot():
+    log.info("🚀 شروع راه‌اندازی ربات...")
+    # پاک کردن وبهوک قبلی
+    log.info("🔄 در حال پاک کردن وبهوک‌های قبلی...")
+    api("deleteWebhook", drop_pending_updates=False)
+    
+    # تست توکن
+    me = api("getMe")
+    if not me.get("ok"):
+        log.error("❌ توکن ربات نامعتبر است! لطفاً Secret را چک کنید.")
+        sys.exit(1)
+    log.info(f"✅ ربات با موفقیت متصل شد: @{me['result']['username']}")
 
-# ---------- Main loop ----------
 def main():
+    setup_bot()
     offset = get_offset()
     start = time.time()
-    log.info(f"Bot started. offset={offset}")
+    log.info(f"🤖 ربات در حال اجراست. offset={offset}")
 
     while time.time() - start < 355 * 60:  # ~5 ساعت و 55 دقیقه
         try:
             r = requests.get(
                 f"{API}/getUpdates",
                 params={"offset": offset, "timeout": 30},
-                timeout=60,
+                timeout=40,
             ).json()
-        except Exception as e:
-            log.error(f"getUpdates error: {e}")
-            time.sleep(5)
-            continue
+            
+            if not r.get("ok"):
+                log.error(f"❌ خطای getUpdates: {r.get('description', 'Unknown')}")
+                time.sleep(10)
+                continue
 
-        for upd in r.get("result", []):
-            offset = upd["update_id"] + 1
-            try:
-                if "message" in upd:
-                    m = upd["message"]
-                    chat_id = m["chat"]["id"]
-                    user = m["from"]
-                    store.add_user(user["id"], user.get("first_name", ""))
+            for upd in r.get("result", []):
+                offset = upd["update_id"] + 1
+                log.info(f"📩 آپدیت دریافت شد: {offset}")
+                
+                try:
+                    if "message" in upd:
+                        m = upd["message"]
+                        chat_id = m["chat"]["id"]
+                        user = m["from"]
+                        store.add_user(user["id"], user.get("first_name", ""))
 
-                    if "text" in m:
-                        t = m["text"]
-                        if t.startswith("/start"):
-                            cmd_start(chat_id, user)
-                        elif t.startswith("/help"):
-                            cmd_help(chat_id)
-                        elif t.startswith("/stats"):
-                            cmd_stats(chat_id, user["id"])
-                        elif t.startswith("/admin") and user["id"] == ADMIN_ID:
-                            s = store.get_stats()
-                            send(chat_id, f"👑 <b>پنل ادمین</b>\n\n👥 کاربران: {s['users']}\n🎵 فایل‌ها: {s['files']}")
-                        else:
-                            handle_text(chat_id, user, t)
+                        if "text" in m:
+                            t = m["text"]
+                            if t.startswith("/start"):
+                                cmd_start(chat_id, user)
+                            elif t.startswith("/help"):
+                                cmd_help(chat_id)
+                            elif t.startswith("/stats"):
+                                cmd_stats(chat_id, user["id"])
+                            elif t.startswith("/admin") and user["id"] == ADMIN_ID:
+                                s = store.get_stats()
+                                send(chat_id, f"👑 <b>پنل ادمین</b>\n\n👥 کاربران: {s['users']}\n🎵 فایل‌ها: {s['files']}")
+                            else:
+                                handle_text(chat_id, user, t)
 
-                    elif "audio" in m or "document" in m:
-                        handle_audio(chat_id, user, m)
+                        elif "audio" in m or "document" in m:
+                            handle_audio(chat_id, user, m)
 
-                    elif "photo" in m:
-                        handle_photo(chat_id, user, m)
+                        elif "photo" in m:
+                            handle_photo(chat_id, user, m)
 
-                elif "callback_query" in upd:
-                    handle_callback(upd["callback_query"])
+                    elif "callback_query" in upd:
+                        handle_callback(upd["callback_query"])
 
-            except Exception as e:
-                log.exception(f"update error: {e}")
+                except Exception as e:
+                    log.exception(f"❌ خطا در پردازش آپدیت: {e}")
+
+                save_offset(offset)
 
             save_offset(offset)
 
-        save_offset(offset)
+        except requests.exceptions.Timeout:
+            log.warning("⏳ تایم‌اوت در getUpdates، تلاش مجدد...")
+            time.sleep(5)
+        except Exception as e:
+            log.error(f"❌ خطای کلی در حلقه اصلی: {e}")
+            time.sleep(5)
 
-    log.info("Bot run finished.")
-
+    log.info("🛑 زمان اجرای ربات تمام شد. خدانگهدار!")
 
 if __name__ == "__main__":
     main()
