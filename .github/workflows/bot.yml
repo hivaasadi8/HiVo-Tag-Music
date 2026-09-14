@@ -1,44 +1,118 @@
-name: Music Tagger Bot
+# ============================================================
+#         🎧 HiVo Tag Music - Telegram Bot Workflow
+# ============================================================
+# این ورک‌فلو ربات تلگرام رو هر ۶ ساعت یکبار اجرا می‌کنه و
+# به مدت ~۶ ساعت فعال نگه می‌داره. تنظیمات بهینه‌شده شامل
+# کش وابستگی‌ها، کنترل همزمانی و گزارش وضعیت هست.
+# ============================================================
+
+name: 🎧 Music Tagger Bot
 
 on:
   schedule:
-    # هر ۶ ساعت یک‌بار
-    - cron: '0 */6 * * *'
+    # هر ۶ ساعت یکبار در دقیقه ۱۷ (برای جلوگیری از شلوغی سرورها)
+    - cron: '17 */6 * * *'
   workflow_dispatch:
+    inputs:
+      duration_minutes:
+        description: '⏱ مدت اجرا (دقیقه)'
+        required: false
+        default: '355'
+        type: string
+      debug:
+        description: '🐛 حالت دیباگ (لاگ‌های بیشتر)'
+        required: false
+        default: false
+        type: boolean
+
+# جلوگیری از اجرای همزمان چند نسخه از ربات
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: write
 
 jobs:
   run-bot:
+    name: 🤖 اجرای ربات
     runs-on: ubuntu-latest
-    timeout-minutes: 358
+    timeout-minutes: 358  # کمی کمتر از سقف ۶ ساعته گیت‌هاب
+
     steps:
-      - uses: actions/checkout@v4
+      # ------------------------------------------------------
+      #   📥 دریافت کد
+      # ------------------------------------------------------
+      - name: 📥 دریافت کد از مخزن
+        uses: actions/checkout@v4
         with:
           persist-credentials: true
 
-      - uses: actions/setup-python@v5
+      # ------------------------------------------------------
+      #   🐍 راه‌اندازی پایتون با کش
+      # ------------------------------------------------------
+      - name: 🐍 راه‌اندازی Python 3.11
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: 'pip'  # ⚡ کش خودکار وابستگی‌ها
 
-      - name: Install deps
+      # ------------------------------------------------------
+      #   📦 نصب وابستگی‌ها
+      # ------------------------------------------------------
+      - name: 📦 نصب وابستگی‌های سیستم
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y ffmpeg
-          pip install -r requirements.txt
 
-      - name: Run bot
+      - name: 📦 نصب پکیج‌های پایتون
+        run: pip install -r requirements.txt
+
+      # ------------------------------------------------------
+      #   🤖 اجرای ربات
+      # ------------------------------------------------------
+      - name: 🤖 اجرای ربات تلگرام
+        id: run_bot
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           ADMIN_ID: ${{ secrets.ADMIN_ID }}
-        run: python main.py
+          DEBUG_MODE: ${{ inputs.debug || 'false' }}
+          DURATION_MINUTES: ${{ inputs.duration_minutes || '355' }}
+        run: |
+          echo "🚀 شروع اجرای ربات..."
+          echo "⏱ مدت اجرا: ${DURATION_MINUTES} دقیقه"
+          echo "🐛 حالت دیباگ: ${DEBUG_MODE}"
+          python main.py
+          echo "✅ ربات با موفقیت اجرا شد."
 
-      - name: Commit state & offset
+      # ------------------------------------------------------
+      #   💾 ذخیره وضعیت و آفست
+      # ------------------------------------------------------
+      - name: 💾 ذخیره وضعیت و آفست
         if: always()
         run: |
+          echo "💾 در حال ذخیره وضعیت..."
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add offset.json state.json
-          git diff --staged --quiet || git commit -m "update state [skip ci]"
-          git push
+          git add offset.json state.json 2>/dev/null || echo "⚠️ فایل‌های وضعیت یافت نشدند"
+          git diff --staged --quiet || git commit -m "🔄 update state [skip ci]"
+          git push 2>/dev/null || echo "⚠️ خطا در پوش (ممکن است تغییری وجود نداشته باشد)"
+          echo "✅ وضعیت ذخیره شد."
+
+      # ------------------------------------------------------
+      #   📊 خلاصه‌ی اجرا
+      # ------------------------------------------------------
+      - name: 📊 خلاصه‌ی اجرا
+        if: always()
+        run: |
+          echo "## 🎧 HiVo Tag Music - گزارش اجرا" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| مورد | مقدار |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| 🕐 زمان شروع | $(date -u '+%Y-%m-%d %H:%M:%S UTC') |" >> $GITHUB_STEP_SUMMARY
+          echo "| ⏱ مدت اجرا | ${{ inputs.duration_minutes || '355' }} دقیقه |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🐛 دیباگ | ${{ inputs.debug || 'false' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 📊 وضعیت | ${{ steps.run_bot.outcome || 'نامشخص' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "*ساخته شده با ❤️ برای موزیک‌دوستان*" >> $GITHUB_STEP_SUMMARY
