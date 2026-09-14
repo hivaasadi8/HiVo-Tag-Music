@@ -43,6 +43,15 @@ def send(chat_id, text, keyboard=None, parse_mode="HTML"):
         data["reply_markup"] = {"inline_keyboard": keyboard}
     return api("sendMessage", **data)
 
+def send_photo(chat_id, photo_url, caption, keyboard=None, parse_mode="HTML"):
+    data = {"chat_id": chat_id, "photo": photo_url, "caption": caption, "parse_mode": parse_mode}
+    if keyboard:
+        data["reply_markup"] = {"inline_keyboard": keyboard}
+    return api("sendPhoto", **data)
+
+def send_sticker(chat_id, sticker_id):
+    return api("sendSticker", chat_id=chat_id, sticker=sticker_id)
+
 def edit_msg(chat_id, msg_id, text, keyboard=None):
     data = {"chat_id": chat_id, "message_id": msg_id, "text": text, "parse_mode": "HTML"}
     if keyboard:
@@ -75,17 +84,32 @@ def download(file_id, name):
         log.error(f"خطا در دانلود: {e}")
         return None
 
-def send_audio(chat_id, path, caption=""):
+def send_audio(chat_id, path, caption="", cover_path=None):
     try:
-        with open(path, "rb") as f:
-            requests.post(
-                f"{API}/sendAudio",
-                data={"chat_id": chat_id, "caption": caption},
-                files={"audio": f},
-                timeout=180
-            )
+        files = {"audio": open(path, "rb")}
+        data = {"chat_id": chat_id, "caption": caption}
+        
+        # اگر کاور داشتیم، به عنوان thumbnail به فایل صوتی اضافه می‌کنیم
+        if cover_path and Path(cover_path).exists():
+            # تلگرام برای thumbnail فقط فرمت JPEG با حجم کم رو قبول می‌کنه
+            thumb_path = TEMP / "thumb.jpg"
+            img = Image.open(cover_path)
+            img.convert("RGB").thumbnail((320, 320))
+            img.save(thumb_path, "JPEG", quality=85)
+            files["thumb"] = open(thumb_path, "rb")
+            
+        requests.post(
+            f"{API}/sendAudio",
+            data=data,
+            files=files,
+            timeout=180
+        )
     except Exception as e:
         log.error(f"خطا در ارسال فایل: {e}")
+    finally:
+        # بستن فایل‌ها
+        for f in files.values():
+            f.close()
 
 # --- دکمه‌های زیبا ---
 def main_menu():
@@ -111,6 +135,9 @@ def preview_menu():
 # --- هندلرها ---
 def cmd_start(chat_id, user):
     store.add_user(user["id"], user.get("first_name", ""))
+    
+    # عکس خوش‌آمدگویی (می‌تونی لینکش رو با یه عکس دلخواه عوض کنی)
+    banner_url = "https://i.ibb.co/6P0wXvT/music-banner.jpg" 
     text = (
         f"سلام <b>{user.get('first_name','')}</b> 👋\n\n"
         "من ربات <b>ادیت تگ موزیک</b> هستم 🎧\n"
@@ -118,7 +145,7 @@ def cmd_start(chat_id, user):
         "📌 فرمت‌های پشتیبانی‌شده: MP3, FLAC, M4A\n"
         "⚠️ حداکثر حجم فایل: 20MB"
     )
-    send(chat_id, text, main_menu())
+    send_photo(chat_id, banner_url, text, main_menu())
 
 def cmd_help(chat_id):
     text = (
@@ -197,7 +224,6 @@ def handle_callback(cb):
 
     if data == "preview":
         answer_cb(cb["id"])
-        # ساخت متن پیش‌نمایش
         p = "📋 <b>پیش‌نمایش تغییرات:</b>\n\n"
         p += f"🎵 اسم آهنگ: <code>{session.get('title') or '---'}</code>\n"
         p += f"🎤 خواننده: <code>{session.get('artist') or '---'}</code>\n"
@@ -222,7 +248,10 @@ def handle_callback(cb):
             out = Path(session["file"])
             new_name = TEMP / f"tagged_{session['orig_name']}"
             out.rename(new_name)
-            send_audio(chat_id, new_name, caption="✅ <b>تگ‌ها با موفقیت اعمال شد!</b>")
+            
+            # ارسال فایل با کاور به عنوان thumbnail
+            send_audio(chat_id, new_name, caption="✅ <b>تگ‌ها با موفقیت اعمال شد!</b>", cover_path=session.get("cover"))
+            
             store.inc_files(user["id"])
             try: new_name.unlink()
             except: pass
@@ -261,12 +290,11 @@ def handle_photo(chat_id, user, msg):
         send(chat_id, "❌ خطا در دانلود کاور")
         return
     
-    # --- اصلاح کاور با Pillow ---
     try:
         img = Image.open(path)
-        img = img.convert("RGB") # تبدیل به RGB برای جلوگیری از خطای JPEG
-        img.thumbnail((1000, 1000)) # کوچک کردن سایز برای بهینه‌سازی
-        img.save(path, "JPEG") # ذخیره با فرمت استاندارد JPEG
+        img = img.convert("RGB")
+        img.thumbnail((1000, 1000))
+        img.save(path, "JPEG")
         log.info(f"Cover converted to JPEG: {path}")
     except Exception as e:
         log.error(f"خطا در تبدیل کاور: {e}")
@@ -287,6 +315,13 @@ def setup_bot():
         log.error("❌ توکن ربات نامعتبر است!")
         sys.exit(1)
     log.info(f"✅ ربات با موفقیت متصل شد: @{me['result']['username']}")
+    
+    # --- اضافه کردن دکمه منو (Menu Button) ---
+    # این کار باعث میشه پایین صفحه تلگرام یه دکمه شیشه‌ای زیبا ظاهر بشه
+    api("setChatMenuButton", menu_button={
+        "type": "commands",
+        "text": "🎵 منوی موزیک"
+    })
 
 def main():
     setup_bot()
