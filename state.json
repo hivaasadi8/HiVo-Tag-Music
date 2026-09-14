@@ -3,16 +3,35 @@
     "8343701928": {
       "name": ".",
       "files": 6,
-      "joined": null
+      "joined": null,
+      "lang": "fa",
+      "formats": {},
+      "last_seen": 1789395025
     },
     "7862983298": {
       "name": "ٓ",
-      "files": 3,
-      "joined": null
+      "files": 4,
+      "joined": null,
+      "lang": "fa",
+      "formats": {
+        "m4a": 1
+      },
+      "last_seen": 1789392465
     }
   },
   "stats": {
-    "total_files": 9
+    "total_files": 10,
+    "total_users": 2,
+    "daily": {
+      "2026-09-14": 1
+    }
   },
-  "sessions": {}
+  "sessions": {},
+  "version": "2.0",
+  "config": {
+    "lock_enabled": true,
+    "channel_username": "@Its_HiVo",
+    "channel_link": "https://t.me/Its_HiVo"
+  },
+  "admin_awaiting": {}
 }
